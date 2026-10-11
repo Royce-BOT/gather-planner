@@ -1,0 +1,578 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Libre+Caslon+Display&display=swap');
+
+:root {
+    --ink: #243f36;
+    --green: #335a46;
+    --muted: #7d857c;
+    --line: #e5e7dd;
+    --bg: #f7f8f2
+}
+
+* {
+    box-sizing: border-box
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px 'DM Sans', sans-serif
+}
+
+button,
+input,
+select,
+textarea {
+    font: inherit
+}
+
+button {
+    cursor: pointer
+}
+
+aside {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 242px;
+    background: #fff;
+    border-right: 1px solid var(--line);
+    padding: 35px 23px;
+    display: flex;
+    flex-direction: column
+}
+
+.brand {
+    color: var(--green);
+    text-decoration: none;
+    display: flex;
+    gap: 12px;
+    font-size: 35px;
+    align-items: center
+}
+
+.brand span {
+    font-family: 'Libre Caslon Display', Georgia, serif;
+    font-size: 40px
+}
+
+.brand small {
+    display: block;
+    font: 9px 'DM Sans', sans-serif;
+    letter-spacing: 2px;
+    margin-top: 4px
+}
+
+.navlabel {
+    font-size: 10px;
+    letter-spacing: 1.7px;
+    color: var(--muted);
+    margin: 55px 14px 15px
+}
+
+nav button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: 0;
+    padding: 15px;
+    border-radius: 8px;
+    color: #758076;
+    margin: 5px 0
+}
+
+nav .active {
+    background: #edf2e9;
+    color: var(--green);
+    font-weight: 600
+}
+
+.asidebottom {
+    margin-top: auto
+}
+
+.seed {
+    background: #f5f5eb;
+    padding: 20px;
+    border-radius: 10px;
+    color: #8a9873;
+    font-size: 26px
+}
+
+.seed p {
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--ink)
+}
+
+.asidebottom button,
+.import {
+    display: block;
+    background: none;
+    border: 0;
+    padding: 12px 0;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer
+}
+
+.asidebottom small {
+    color: var(--muted);
+    font-size: 10px
+}
+
+main {
+    margin-left: 242px;
+    padding: 0 45px
+}
+
+header {
+    height: 86px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--muted)
+}
+
+.profile {
+    border-radius: 50%;
+    background: #e5ebdd;
+    color: var(--green);
+    padding: 12px
+}
+
+.heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 36px 0 28px;
+    gap: 15px
+}
+
+h1 {
+    font: 43px 'Libre Caslon Display', Georgia, serif;
+    margin: 0 0 9px
+}
+
+h2 {
+    font-size: 19px;
+    font-weight: 500;
+    margin: 0
+}
+
+p {
+    color: var(--muted);
+    line-height: 1.6
+}
+
+.heading p {
+    margin: 0;
+    font-size: 13px
+}
+
+.primary {
+    background: var(--green);
+    color: white;
+    border: 0;
+    padding: 13px 20px;
+    border-radius: 7px
+}
+
+.secondary {
+    border: 1px solid var(--line);
+    background: white;
+    border-radius: 6px;
+    padding: 9px 13px;
+    color: var(--ink)
+}
+
+.hero {
+    background: #e8eddf;
+    border-radius: 13px;
+    padding: 30px 34px;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    justify-content: space-between;
+    align-items: center
+}
+
+.hero:after {
+    content: '✦';
+    font-size: 230px;
+    position: absolute;
+    right: 25px;
+    top: -63px;
+    color: #ccd8b9;
+    opacity: .5;
+    pointer-events: none
+}
+
+.hero>div {
+    position: relative;
+    z-index: 1
+}
+
+.eyebrow {
+    font-size: 10px;
+    letter-spacing: 1.7px;
+    font-weight: 600;
+    color: #637758
+}
+
+.hero h2 {
+    font: 34px 'Libre Caslon Display', Georgia, serif;
+    margin: 14px 0 8px
+}
+
+.hero p {
+    font-size: 13px;
+    margin: 0 0 18px
+}
+
+.tag {
+    font-size: 11px;
+    border-radius: 20px;
+    padding: 6px 10px;
+    display: inline-block;
+    background: #edf1e8;
+    color: #59724f
+}
+
+.stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    margin: 24px 0 30px
+}
+
+.stat,
+.panel,
+.card {
+    background: white;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    padding: 22px
+}
+
+.stat span {
+    font-size: 12px;
+    color: var(--muted)
+}
+
+.stat b {
+    display: block;
+    font-size: 29px;
+    font-weight: 500;
+    margin: 12px 0 4px
+}
+
+.stat small {
+    font-size: 11px;
+    color: var(--muted)
+}
+
+.columns {
+    display: grid;
+    grid-template-columns: 1.45fr 1fr;
+    gap: 23px
+}
+
+.panelhead {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 22px
+}
+
+.textbutton {
+    border: 0;
+    background: none;
+    color: var(--green);
+    font-size: 12px
+}
+
+.row {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    padding: 17px 0;
+    border-top: 1px solid var(--line)
+}
+
+.date {
+    background: #f2f4eb;
+    min-width: 51px;
+    text-align: center;
+    border-radius: 7px;
+    padding: 9px 7px;
+    font-size: 10px;
+    color: #78836d
+}
+
+.date b {
+    display: block;
+    font-size: 22px;
+    color: var(--ink);
+    font-weight: 500
+}
+
+.rowinfo {
+    flex: 1
+}
+
+.rowinfo b {
+    font-size: 13px;
+    font-weight: 500
+}
+
+.rowinfo p {
+    font-size: 11px;
+    margin: 5px 0 0
+}
+
+.avatar {
+    background: #eceee5;
+    border-radius: 50%;
+    padding: 11px;
+    font-size: 12px
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px
+}
+
+.card h2 {
+    margin: 15px 0 8px
+}
+
+.card p {
+    font-size: 13px
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 20px;
+    flex-wrap: wrap
+}
+
+.search {
+    width: 100%;
+    padding: 13px 15px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    margin: 0 0 24px;
+    background: white
+}
+
+.empty {
+    padding: 30px;
+    text-align: center;
+    color: var(--muted)
+}
+
+footer {
+    padding: 35px 0;
+    font-size: 11px;
+    color: #929b8c
+}
+
+dialog {
+    border: 0;
+    border-radius: 12px;
+    padding: 28px;
+    width: 520px;
+    max-width: 94vw;
+    color: var(--ink)
+}
+
+dialog::backdrop {
+    background: #1c332b70
+}
+
+.modalhead {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 22px
+}
+
+.modalhead button {
+    border: 0;
+    background: none;
+    font-size: 27px
+}
+
+label {
+    display: block;
+    font-size: 12px;
+    margin: 13px 0
+}
+
+input,
+select,
+textarea {
+    width: 100%;
+    padding: 11px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: white;
+    color: var(--ink);
+    margin-top: 6px
+}
+
+textarea {
+    min-height: 90px
+}
+
+#toast {
+    position: fixed;
+    bottom: 25px;
+    right: 25px;
+    background: var(--green);
+    color: white;
+    padding: 14px 22px;
+    border-radius: 8px;
+    display: none
+}
+
+.programrow {
+    display: grid;
+    grid-template-columns: 45px 1fr auto;
+    gap: 12px;
+    padding: 18px 0;
+    border-top: 1px solid var(--line)
+}
+
+.programrow small {
+    color: var(--muted)
+}
+
+.back {
+    margin-top: 25px
+}
+
+@media(max-width:1000px) {
+    aside {
+        width: 190px;
+        padding: 25px 15px
+    }
+
+    main {
+        margin-left: 190px;
+        padding: 0 25px
+    }
+
+    .columns {
+        grid-template-columns: 1fr
+    }
+}
+
+@media(max-width:650px) {
+    aside {
+        position: relative;
+        width: 100%;
+        padding: 18px
+    }
+
+    .brand {
+        font-size: 20px
+    }
+
+    .brand span {
+        font-size: 30px
+    }
+
+    .navlabel,
+    .asidebottom {
+        display: none
+    }
+
+    nav {
+        display: flex;
+        overflow: auto;
+        margin-top: 15px
+    }
+
+    nav button {
+        white-space: nowrap;
+        font-size: 12px;
+        padding: 10px
+    }
+
+    main {
+        margin: 0;
+        padding: 0 18px
+    }
+
+    header {
+        height: 55px
+    }
+
+    .heading {
+        align-items: flex-start
+    }
+
+    h1 {
+        font-size: 35px
+    }
+
+    .heading .primary {
+        padding: 11px;
+        font-size: 12px
+    }
+
+    .stats {
+        gap: 8px
+    }
+
+    .stat {
+        padding: 14px
+    }
+
+    .stat span {
+        font-size: 10px
+    }
+
+    .grid {
+        grid-template-columns: 1fr
+    }
+
+    .hero {
+        padding: 24px
+    }
+
+    .hero h2 {
+        font-size: 28px
+    }
+}
+
+@media print {
+
+    aside,
+    header,
+    footer,
+    .actions,
+    .back,
+    .primary,
+    .textbutton {
+        display: none !important
+    }
+
+    main {
+        margin: 0
+    }
+
+    .panel {
+        border: 0
+    }
+
+    body {
+        background: white
+    }
+}

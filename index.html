@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Gather · Worship & Ministry Planner</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <aside><a class="brand" href="#">✦ <span>gather<small>WORSHIP & MINISTRY</small></span></a>
+        <p class="navlabel">YOUR WORKSPACE</p>
+        <nav><button data-view="overview" class="active">◫ &nbsp; Overview</button><button data-view="services">▦ &nbsp;
+                Service planner</button><button data-view="team">♧ &nbsp; Ministry team</button><button
+                data-view="songs">♫ &nbsp; Song library</button></nav>
+        <div class="asidebottom">
+            <div class="seed">✦<p>Made for meaningful<br>moments together.</p>
+            </div><button id="export">↓ Export backup</button><label class="import">↑ Import backup<input id="import"
+                    type="file" accept="application/json" hidden></label><small>Saved on this browser</small>
+        </div>
+    </aside>
+    <main>
+        <header><span id="breadcrumb">Workspace / Overview</span><span class="profile">JR</span></header>
+        <div id="content"></div>
+        <footer>Gather · Plan with purpose. Serve with joy.</footer>
+    </main>
+    <dialog id="modal">
+        <form id="form">
+            <div class="modalhead">
+                <h2 id="modaltitle"></h2><button type="button" id="close" aria-label="Close">×</button>
+            </div>
+            <div id="fields"></div><button class="primary" type="submit">Save changes</button>
+        </form>
+    </dialog>
+    <div id="toast" role="status"></div>
+    <script src="app.js"></script>
+</body>
+
+</html>
