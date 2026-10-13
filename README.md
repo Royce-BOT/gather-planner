@@ -152,7 +152,7 @@ After setup, run these remaining **live** checks with test accounts:
 3. Deploy through Vercel. Set the actual production URL in Supabase Site URL/Redirect URLs and Google's origins.
 4. Perform the live checklist before inviting your church.
 
-Public source assets are `index.html`, `style.css`, `config.js`, `planner.js`, `render.js`, `auth.js`, `access.js`, `admin.js`, and `app.js`. Keep privileged credentials and private backups out of every repository file. Local test artifacts under `.local-qa` should not be committed. `.gitignore` excludes new environment files and private backups; it does not erase files already committed in Git history.
+Public source assets are `index.html`, `style.css`, `config.js`, `planner.js`, `render.js`, `auth.js`, `access.js`, `admin.js`, and `app.js`, plus `assets/gather-logo.png`, `assets/gather-icon-192.png`, and `assets/gather-icon-32.png`. The logo appears in the sidebar and sign-in screen; the smaller icons also supply the browser/touch icons. Its creation prompt is recorded in [assets/logo-design.md](assets/logo-design.md), which stays outside the public asset allowlist. Keep privileged credentials and private backups out of every repository file. Local test artifacts under `.local-qa` should not be committed. `.gitignore` excludes new environment files and private backups; it does not erase files already committed in Git history.
 
 After deploying when you choose to, check response headers and confirm `/README.md`, `/setup.sql`, `/.env`, `/sql/first-admin.sql`, and `/tests/app.test.mjs` return 404. Check the browser console for CSP/SRI errors, public loading, and all login methods. The deployment configuration and headers were tested locally; hosted Vercel behavior remains unverified.
 

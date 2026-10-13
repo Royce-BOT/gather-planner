@@ -11,3 +11,8 @@
 !app.js
 !vercel.json
 !package.json
+!assets/
+assets/*
+!assets/gather-logo.png
+!assets/gather-icon-192.png
+!assets/gather-icon-32.png

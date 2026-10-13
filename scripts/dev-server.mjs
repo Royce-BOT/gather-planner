@@ -13,6 +13,7 @@ const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+  ...['gather-logo.png', 'gather-icon-192.png', 'gather-icon-32.png'].map(file => [`/assets/${file}`, [`assets/${file}`, 'image/png']]),
   ...['config.js', 'planner.js', 'render.js', 'app.js', 'auth.js', 'access.js', 'admin.js'].map(file => [`/${file}`, [file, 'text/javascript; charset=utf-8']])
 ]);
 

@@ -55,11 +55,26 @@ aside {
     font-size: 40px
 }
 
+.brand-mark {
+    display: block;
+    flex: 0 0 auto;
+    width: 44px;
+    height: 44px;
+    object-fit: contain
+}
+
 .brand small {
     display: block;
     font: 9px 'DM Sans', sans-serif;
     letter-spacing: 2px;
     margin-top: 4px
+}
+
+@media (min-width: 651px) and (max-width: 1000px) {
+    #workspace-sidebar .brand { gap: 9px; }
+    #workspace-sidebar .brand span { font-size: 32px; }
+    #workspace-sidebar .brand small { font-size: 8px; letter-spacing: 1.3px; }
+    #workspace-sidebar .brand-mark { width: 36px; height: 36px; }
 }
 
 .navlabel {
@@ -488,6 +503,11 @@ textarea {
 
     .brand span {
         font-size: 30px
+    }
+
+    .brand-mark {
+        width: 36px;
+        height: 36px
     }
 
     .navlabel,

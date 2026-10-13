@@ -19,6 +19,7 @@
     },
     { "src": "^/$", "dest": "/index.html", "methods": ["GET", "HEAD"] },
     { "src": "^/(index\\.html|style\\.css|config\\.js|planner\\.js|render\\.js|access\\.js|admin\\.js|auth\\.js|app\\.js)$", "dest": "/$1", "methods": ["GET", "HEAD"] },
+    { "src": "^/assets/(gather-logo\\.png|gather-icon-192\\.png|gather-icon-32\\.png)$", "dest": "/assets/$1", "methods": ["GET", "HEAD"] },
     { "src": "/.*", "status": 404 }
   ]
 }
