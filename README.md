@@ -86,6 +86,23 @@ Email registration creates the Auth account first. After confirming email, the p
 
 These settings follow [Supabase Google sign-in documentation](https://supabase.com/docs/guides/auth/social-login/auth-google). Google enters the same pending workflow. Repeated sign-ins preserve approved, rejected, and revoked memberships.
 
+### Repeated token refreshes or a 429 error
+
+If the browser shows `token?grant_type=refresh_token` repeatedly, followed by
+`429 Too Many Requests`, inspect the warning immediately above it. A session
+that "expires in" a negative number is already expired according to the browser.
+An inaccurate device clock or an old OAuth return URL can cause this warning.
+If even newly refreshed sessions appear expired, Gather pauses refresh handling
+and keeps private records hidden instead of repeatedly verifying that session.
+
+On the device running the browser, enable automatic date/time and check the
+time zone. On Windows, use Settings → Time & language → Date & time → Sync now.
+Close duplicate Gather tabs, allow the rate limit to recover, then open Gather's
+normal address and start a fresh sign-in. Do not reopen a copied URL containing
+OAuth session tokens. If the clock is correct and the problem remains, inspect
+the failed request's Response tab for its error code; do not share access or
+refresh tokens. See [Supabase Auth rate limits](https://supabase.com/docs/guides/auth/rate-limits).
+
 ## 6. Run locally
 
 Install Node.js 22 or newer. In a terminal at this repository:
@@ -116,7 +133,7 @@ Refresh data/Check status rechecks access. Focus, visibility changes, and a one-
 
 Locally passed:
 
-- JavaScript syntax checks and **105 Node tests**, with mocked Auth/RPC responses and a small DOM harness plus actual local-server HTTP checks: public/role boundaries, email/Google/recovery and session races, account-bound private reads, existing planner/admin features, stale or ambiguous saves, invalid draft/calendar/import validation, coalesced refreshes, future-service selection, admin cleanup/role drafts, credential redaction, CSP/config consistency, and static route restrictions. See [AUDIT.md](AUDIT.md) for evidence and scope.
+- JavaScript syntax checks and **111 Node tests**, with mocked Auth/RPC responses and a small DOM harness plus actual local-server HTTP checks: public/role boundaries, email/Google/recovery and session races, account-bound private reads, existing planner/admin features, stale or ambiguous saves, invalid draft/calendar/import validation, coalesced refreshes, future-service selection, admin cleanup/role drafts, credential redaction, CSP/config consistency, static route restrictions, and expired-session refresh-loop handling. See [AUDIT.md](AUDIT.md) for evidence and scope.
 - PostgreSQL 18 in a new isolated local cluster: **130 security assertions** (81 core permission/member checks plus 49 public-interface checks), nine migration/bootstrap preservation checks, and six two-connection concurrency scenarios. Public checks execute anonymous/pending/viewer/editor/admin roles, verify exact projection contents and omission of private fields, deny anonymous writes/private reads and pending edits, allow editor writes, and preserve church/last-admin protection. Concurrency cases cover admin RPC revocation, owner demotions, and editor saves racing revocation/demotion under Read Committed/Repeatable Read. Rejected writes leave planner JSON and versions unchanged.
 
 Mocked client denials alone do not prove RLS. The local PostgreSQL checks execute actual RLS/RPCs, using a minimal `auth.users`/`auth.uid()` fixture and synthetic JWT claims. They do not exercise hosted Auth/PostgREST.

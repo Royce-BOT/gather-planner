@@ -9,6 +9,9 @@
     let user = null, recovery = false, locallySignedOut = false, lifecycle = 0, eventTimer = null;
     let subscription = null, retryAction = null, startPromise = null, logoutPromise = null, suppressSignedOutMessage = false;
     let actionPromise = null, actionRevision = 0;
+    let sessionTimingBlocked = false, refreshPaused = false, managesRefreshVisibility = false;
+    let refreshControl = Promise.resolve();
+    const sessionTimingMessage = 'Your new sign-in session is already expired or expires too soon. Check that your device uses automatic date, time and time zone, then try again or start a fresh sign-in.';
 
     function storedRecovery() {
         try { return window.sessionStorage.getItem(RECOVERY_KEY) || ''; } catch { return ''; }
@@ -168,7 +171,51 @@
         lifecycle++;
         if (eventTimer !== null) { clearTimeout(eventTimer); eventTimer = null; }
     }
-    async function receiveSession(session, event, ticket) {
+    function unusableSessionTiming(session) {
+        if (!Number.isFinite(session?.expires_at)) return false;
+        const margin = Number.isFinite(session.expires_in) && session.expires_in > 0 ? Math.min(90, session.expires_in / 10) : 0;
+        return session.expires_at <= Date.now() / 1000 + margin;
+    }
+    function syncRefresh() {
+        // SDK start awaits an internal stop. Serialize our controls and use the latest desired state.
+        refreshControl = refreshControl.catch(() => {}).then(() => refreshPaused || document.visibilityState === 'hidden'
+            ? client.auth.stopAutoRefresh?.() : client.auth.startAutoRefresh?.());
+        return refreshControl;
+    }
+    async function pauseRefresh() {
+        refreshPaused = true;
+        // These SDK methods take over its visibility handling. Keep resumed refresh foreground-only.
+        if (!managesRefreshVisibility) {
+            managesRefreshVisibility = true;
+            document.addEventListener?.('visibilitychange', () => {
+                if (refreshPaused || !client) return;
+                syncRefresh().catch(() => { /* A later explicit session check can retry. */ });
+            });
+        }
+        await syncRefresh();
+    }
+    async function resumeRefresh() {
+        if (!refreshPaused) return;
+        refreshPaused = false;
+        await syncRefresh();
+    }
+    async function blockSessionTiming() {
+        if (sessionTimingBlocked) return;
+        sessionTimingBlocked = true;
+        cancelPending();
+        user = null;
+        // Run outside the SDK event lock, and block reentrant refresh events before clearing private data.
+        const paused = pauseRefresh().catch(() => {});
+        callbacks.onSignedOut?.();
+        show(recovery ? 'recovery' : 'signin');
+        status(sessionTimingMessage, 'error');
+        retryAction = () => checkSession(true);
+        $('auth-retry').textContent = 'Check session again';
+        $('auth-retry').hidden = false;
+        callbacks.onError?.(new Error(sessionTimingMessage));
+        await paused;
+    }
+    async function receiveSession(session, event, ticket, allowTimingResume = false) {
         if (ticket !== lifecycle || locallySignedOut) return;
         if (!session) {
             const wasRecovery = recovery;
@@ -180,7 +227,17 @@
             return;
         }
         try {
-            const result = await client.auth.getUser();
+            if (event === 'TOKEN_REFRESHED' && unusableSessionTiming(session)) { await blockSessionTiming(); return; }
+            if (sessionTimingBlocked) {
+                if (!allowTimingResume) return;
+                if (unusableSessionTiming(session)) { status(sessionTimingMessage, 'error'); return; }
+                sessionTimingBlocked = false;
+            }
+            if (allowTimingResume && !unusableSessionTiming(session)) await resumeRefresh();
+            if (ticket !== lifecycle || locallySignedOut) return;
+            // Verify this event's token with Auth directly. getUser() without a token can
+            // refresh locally "expired" sessions and recursively emit TOKEN_REFRESHED.
+            const result = await client.auth.getUser(session.access_token);
             if (ticket !== lifecycle || locallySignedOut) return;
             if (result.error) throw result.error;
             const verified = result.data?.user;
@@ -227,11 +284,11 @@
             callbacks.onError?.(error);
         }
     }
-    function scheduleSession(session, event = 'SIGNED_IN') {
+    function scheduleSession(session, event = 'SIGNED_IN', allowTimingResume = false) {
         cancelPending();
         const ticket = lifecycle;
         // Supabase can hold an auth lock while delivering events. Never await its API inside that callback.
-        eventTimer = setTimeout(() => { eventTimer = null; void receiveSession(session, event, ticket); }, 0);
+        eventTimer = setTimeout(() => { eventTimer = null; void receiveSession(session, event, ticket, allowTimingResume); }, 0);
     }
     function authEvent(event, session) {
         if (event === 'SIGNED_OUT') {
@@ -251,6 +308,7 @@
             callbacks.onSignedOut?.();
             show('recovery');
         }
+        if (sessionTimingBlocked) return;
         if (user && session?.user?.id && session.user.id !== user.id) {
             user = null;
             callbacks.onSignedOut?.();
@@ -258,15 +316,16 @@
         }
         if (['INITIAL_SESSION', 'SIGNED_IN', 'PASSWORD_RECOVERY', 'TOKEN_REFRESHED', 'USER_UPDATED'].includes(event) && !locallySignedOut) scheduleSession(session, event);
     }
-    async function checkSession() {
+    async function checkSession(allowTimingResume = false) {
         if (!client || locallySignedOut) return false;
+        if (sessionTimingBlocked && !allowTimingResume) return false;
         cancelPending();
         const ticket = lifecycle;
         try {
             const { data, error } = await client.auth.getSession();
             if (ticket !== lifecycle || locallySignedOut) return false;
             if (error) throw error;
-            await receiveSession(data.session, 'SESSION_RECHECK', ticket);
+            await receiveSession(data.session, 'SESSION_RECHECK', ticket, allowTimingResume);
             return ticket === lifecycle && Boolean(user) && !recovery;
         } catch (error) {
             if (ticket !== lifecycle || locallySignedOut) return false;
@@ -289,7 +348,7 @@
             locallySignedOut = false;
             pendingSignout(false);
             clearPasswords();
-            scheduleSession(data.session, 'SIGNED_IN');
+            scheduleSession(data.session, 'SIGNED_IN', true);
         }, 'Signing in…');
     }
     async function register(values) {
@@ -302,7 +361,7 @@
             if (error) throw error;
             clearForm();
             show('signin', 'Check your inbox to verify your email, then sign in. Your church access request will be sent after verified sign-in; admin approval is a separate step.');
-            if (data.session) { locallySignedOut = false; pendingSignout(false); scheduleSession(data.session, 'SIGNED_IN'); }
+            if (data.session) { locallySignedOut = false; pendingSignout(false); scheduleSession(data.session, 'SIGNED_IN', true); }
         }, 'Creating your account…');
     }
     async function requestPasswordReset(values) {
@@ -474,6 +533,7 @@
         return startPromise;
     }
     function retry() {
+        if (sessionTimingBlocked) return checkSession(true);
         // Reuse an in-flight connection attempt when visitors click retry twice.
         if (busy && startPromise) return startPromise;
         startPromise = null;

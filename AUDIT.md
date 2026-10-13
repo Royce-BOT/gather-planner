@@ -89,3 +89,30 @@ Hosted Supabase/PostgREST, email/SMTP delivery, Google consent/redirects, recove
 6. Deploy only when you choose to. Retain the Vercel config/file allowlists, then verify response headers, blocked repository paths, SDK SRI/CSP loading, auth redirects, public privacy, conflict handling and mobile/print rendering before inviting users.
 
 If a read-only review or a private load reveals malformed historical planner data, preserve an owner-only database backup and prepare a reviewed correction. The audit migration intentionally leaves those rows intact; it does not silently normalize dates, remove records, or rewrite planner versions.
+
+## Follow-up: repeated token refreshes, 2026-10-13
+
+A browser screenshot showed repeated successful token refresh/user requests,
+then HTTP 429, with an OAuth session expiry already far in the past relative to
+the browser clock. Read-only hosted Auth logs confirmed repeated refreshes and
+`over_request_rate_limit`. The screenshot does not establish the cause of the
+earlier Google-hosted 401 page or conclusively distinguish an inaccurate device
+clock from stale callback data.
+
+Source inspection and an isolated experiment with the pinned SDK confirmed an
+amplification path: parameterless `getUser()` checks the locally stored expiry,
+refreshes, emits `TOKEN_REFRESHED`, and causes Gather to verify again. If every
+fresh token still appears expired, that chain repeats. `auth.js` now verifies an
+event's access token directly with the Auth server and still checks the expected
+user ID. Fresh refresh events with unusable expiry pause once, clear protected
+workspace access, and show date/time/session guidance. Reentrant events remain
+blocked until an explicit retry or new login has usable timing. Recovery markers
+are preserved. Guard-owned refresh controls are serialized and retain foreground
+visibility handling when resumed.
+
+The integrated suite now passes **111 JavaScript tests**, including **36 Auth
+tests** and six new regressions for this failure, retry, recovery, and delayed
+refresh restart behavior. Syntax and whitespace checks pass. No SDK files,
+database schema/data, rate limits, or live Auth settings were changed. These
+source changes remain local; the reported browser flow still needs retesting
+after checking the device clock and starting a fresh sign-in.

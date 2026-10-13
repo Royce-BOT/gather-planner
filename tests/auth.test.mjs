@@ -8,7 +8,7 @@ const markup = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const tags = new Map([...markup.matchAll(/<[^>]*\bid="([^"]+)"[^>]*>/g)].map(match => [match[1], match[0]]));
 const ids = [...tags.keys()];
 const verifiedUser = { id: 'member-a', email: 'member@example.test', email_confirmed_at: '2026-10-13T00:00:00Z', user_metadata: { full_name: 'Church Member' } };
-const sessionFor = user => ({ user });
+const sessionFor = user => ({ user, access_token: `fixture-access-${user.id}`, expires_at: Math.floor(Date.now() / 1000) + 3600, expires_in: 3600 });
 const flush = () => new Promise(resolve => setTimeout(resolve, 10));
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -36,7 +36,9 @@ async function fixture({ session = null, currentUser = verifiedUser, href = 'htt
   const auth = {
     onAuthStateChange(callback) { calls.push(['subscribe']); listener = callback; return { data: { subscription: { unsubscribe() {} } } }; },
     async getSession() { calls.push(['getSession']); return { data: { session }, error: failure.getSession || null }; },
-    async getUser() { calls.push(['getUser']); return deferred.getUser ? await deferred.getUser : { data: { user: currentUser }, error: failure.getUser || null }; },
+    async getUser(jwt) { calls.push(['getUser', jwt]); return deferred.getUser ? await deferred.getUser : { data: { user: currentUser }, error: failure.getUser || null }; },
+    async stopAutoRefresh() { calls.push(['stopAutoRefresh']); },
+    async startAutoRefresh() { calls.push(['startAutoRefresh']); },
     async signInWithPassword(values) {
       calls.push(['signInWithPassword', plain(values)]);
       if (!failure.signIn) { session = sessionFor(currentUser); listener?.('SIGNED_IN', session); }
@@ -55,7 +57,10 @@ async function fixture({ session = null, currentUser = verifiedUser, href = 'htt
     history: { state: null, replaceState(state, title, target) { calls.push(['replaceState', target]); window.location = new URL(target, window.location); } },
     supabase: { createClient(url, key, options) { calls.push(['createClient', plain(options)]); return { auth }; } }
   };
+  const documentHandlers = new Map();
   const document = {
+    visibilityState: 'visible',
+    addEventListener(type, handler) { documentHandlers.set(type, handler); },
     getElementById: id => elements.get(id),
     body: { classList: { add: value => classes.add(value), remove: value => classes.delete(value) } },
     querySelectorAll(selector) {
@@ -72,7 +77,7 @@ async function fixture({ session = null, currentUser = verifiedUser, href = 'htt
     if (nextSession?.user) currentUser = nextSession.user;
     listener(event, nextSession);
   };
-  configureAuth?.(auth, emit);
+  configureAuth?.(auth, emit, calls);
   await api.start({
     url: 'https://test.supabase.co', key: 'public-test-key',
     onReady() { calls.push(['ready']); },
@@ -81,7 +86,7 @@ async function fixture({ session = null, currentUser = verifiedUser, href = 'htt
     onError(error) { calls.push(['error', error.message]); }
   });
   await flush();
-  return { api, calls, elements, window, store, auth, classes, emit, flush };
+  return { api, calls, elements, window, store, auth, classes, emit, flush, document, documentHandlers };
 }
 
 test('signed-out startup leaves the public workspace visible and login and registration can be dismissed', async () => {
@@ -479,4 +484,127 @@ test('logout during an unfinished password login suppresses its late event and c
   assert.equal(f.elements.get('auth-screen').hidden, true);
   await f.api.checkSession();
   assert.equal(f.api.currentUser, null);
+});
+
+test('token events verify their exact access token without inducing another SDK session refresh', async () => {
+  let parameterlessReads = 0, tokenReads = 0;
+  const session = sessionFor(verifiedUser);
+  const f = await fixture({ configureAuth(auth, emit) {
+    auth.getUser = async jwt => {
+      if (!jwt) {
+        parameterlessReads++;
+        if (parameterlessReads < 4) emit('TOKEN_REFRESHED', session);
+      } else {
+        tokenReads++;
+        assert.equal(jwt, session.access_token);
+      }
+      return { data: { user: verifiedUser }, error: null };
+    };
+  } });
+  f.emit('TOKEN_REFRESHED', session);
+  await flush();
+  await flush();
+  assert.equal(parameterlessReads, 0);
+  assert.equal(tokenReads, 1);
+  assert.equal(f.calls.filter(call => call[0] === 'session').length, 1);
+  assert.equal(f.calls.some(call => call[0] === 'stopAutoRefresh'), false);
+  assert.equal(f.calls.some(call => call[0] === 'startAutoRefresh'), false);
+});
+
+test('an already expired fresh refresh pauses once, blocks reentrant events and preserves public browsing', async () => {
+  const bad = { ...sessionFor(verifiedUser), expires_at: Math.floor(Date.now() / 1000) - 21511 };
+  let stopCalls = 0;
+  const f = await fixture({ session: sessionFor(verifiedUser), configureAuth(auth, emit) {
+    auth.stopAutoRefresh = async () => { stopCalls++; emit('TOKEN_REFRESHED', bad); };
+  } });
+  const reads = f.calls.filter(call => call[0] === 'getUser').length;
+  const signouts = f.calls.filter(call => call[0] === 'signedOut').length;
+  f.emit('TOKEN_REFRESHED', bad);
+  await flush();
+  f.emit('TOKEN_REFRESHED', bad);
+  f.emit('SIGNED_IN', sessionFor(verifiedUser));
+  await flush();
+  assert.equal(stopCalls, 1);
+  assert.equal(f.calls.filter(call => call[0] === 'signedOut').length, signouts + 1);
+  assert.equal(f.calls.filter(call => call[0] === 'getUser').length, reads);
+  assert.equal(f.api.currentUser, null);
+  assert.match(f.elements.get('auth-status').textContent, /automatic date, time and time zone/);
+  assert.equal(f.elements.get('auth-retry').hidden, false);
+  await f.api.dismiss();
+  assert.equal(f.elements.get('auth-screen').hidden, true);
+  assert.equal(f.elements.get('workspace-main').inert, false);
+  assert.equal(await f.api.checkSession(), false);
+});
+
+test('explicit retries keep a bad session paused and resume a healthy session with foreground visibility handling', async () => {
+  const bad = { ...sessionFor(verifiedUser), expires_at: Math.floor(Date.now() / 1000) + 30 };
+  const f = await fixture();
+  f.emit('TOKEN_REFRESHED', bad);
+  await flush();
+  assert.equal(await f.api.retry(), false);
+  assert.equal(f.calls.some(call => call[0] === 'startAutoRefresh'), false);
+  assert.equal(f.api.currentUser, null);
+  f.emit('TOKEN_REFRESHED', sessionFor(verifiedUser));
+  assert.equal(await f.api.retry(), true);
+  assert.equal(f.api.currentUser.id, verifiedUser.id);
+  assert.equal(f.calls.filter(call => call[0] === 'startAutoRefresh').length, 1);
+  f.document.visibilityState = 'hidden';
+  f.documentHandlers.get('visibilitychange')();
+  await flush();
+  assert.equal(f.calls.filter(call => call[0] === 'stopAutoRefresh').length, 2);
+  f.document.visibilityState = 'visible';
+  f.documentHandlers.get('visibilitychange')();
+  await flush();
+  assert.equal(f.calls.filter(call => call[0] === 'startAutoRefresh').length, 2);
+});
+
+test('a fresh explicit sign-in resumes a paused session but still verifies the account with Auth', async () => {
+  const f = await fixture();
+  f.emit('TOKEN_REFRESHED', { ...sessionFor(verifiedUser), expires_at: Math.floor(Date.now() / 1000) - 1 });
+  await flush();
+  assert.equal(await f.api.signIn({ email: verifiedUser.email, password: 'strong-pass' }), true);
+  await flush();
+  assert.equal(f.api.currentUser.id, verifiedUser.id);
+  assert.equal(f.calls.filter(call => call[0] === 'startAutoRefresh').length, 1);
+  assert.equal(f.calls.filter(call => call[0] === 'getUser').at(-1)[1], sessionFor(verifiedUser).access_token);
+});
+
+test('a timing failure during a delayed SDK refresh restart leaves refresh stopped', async () => {
+  const bad = { ...sessionFor(verifiedUser), expires_at: Math.floor(Date.now() / 1000) - 1 };
+  const f = await fixture();
+  f.emit('TOKEN_REFRESHED', bad);
+  await flush();
+  let finishStart;
+  f.auth.startAutoRefresh = async () => {
+    f.calls.push(['delayedStart']);
+    await new Promise(resolve => { finishStart = resolve; });
+    f.calls.push(['finishedStart']);
+  };
+  f.emit('TOKEN_REFRESHED', sessionFor(verifiedUser));
+  const retry = f.api.retry();
+  await flush();
+  assert.equal(typeof finishStart, 'function');
+  f.emit('TOKEN_REFRESHED', bad);
+  await flush();
+  finishStart();
+  assert.equal(await retry, false);
+  await flush();
+  assert.equal(f.api.currentUser, null);
+  assert.deepEqual(f.calls.filter(call => ['delayedStart', 'finishedStart', 'stopAutoRefresh'].includes(call[0])).map(call => call[0]), [
+    'stopAutoRefresh', 'delayedStart', 'finishedStart', 'stopAutoRefresh'
+  ]);
+});
+
+test('timing problems preserve recovery markers and retry into recovery without granting private access', async () => {
+  const f = await fixture({ session: sessionFor(verifiedUser), storedRecovery: verifiedUser.id });
+  f.emit('TOKEN_REFRESHED', { ...sessionFor(verifiedUser), expires_at: Math.floor(Date.now() / 1000) - 1 });
+  await flush();
+  assert.equal(f.store.get('gather-password-recovery'), verifiedUser.id);
+  assert.equal(f.elements.get('auth-submit').textContent, 'Save new password');
+  assert.equal(f.calls.some(call => call[0] === 'session'), false);
+  f.emit('TOKEN_REFRESHED', sessionFor(verifiedUser));
+  assert.equal(await f.api.retry(), false);
+  assert.equal(f.store.get('gather-password-recovery'), verifiedUser.id);
+  assert.equal(f.api.currentUser.id, verifiedUser.id);
+  assert.equal(f.calls.some(call => call[0] === 'session'), false);
 });
