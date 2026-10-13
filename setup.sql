@@ -1,4 +1,6 @@
--- Run once in Supabase SQL Editor. No public or self-enrollment access.
+-- ORIGINAL BASE SCHEMA: new installations only. Never rerun on an existing church.
+-- After this file, run migrations/20261013_member_approval.sql, then sql/first-admin.sql.
+-- Existing installations should run ONLY the upgrade, following README.md.
 begin;
 create table public.gather_planners (
  id uuid primary key default gen_random_uuid(),
@@ -35,8 +37,5 @@ create trigger gather_version before update on public.gather_planners for each r
 insert into public.gather_planners(name) values ('My Church') returning id;
 commit;
 -- Copy the returned id into CHURCH_ID in app.js.
--- After signing up, find each user's UUID in Authentication > Users.
--- Run the following separately with actual UUID values:
--- insert into public.gather_members(church_id,user_id,role)
--- values ('CHURCH_UUID','USER_UUID','editor');
--- Use 'viewer' instead of 'editor' for read-only members.
+-- Follow README.md to apply the upgrade and promote your verified existing account
+-- with explicit church/user UUIDs. Subsequent approvals happen in Admin workspace.

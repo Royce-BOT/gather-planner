@@ -1,54 +1,152 @@
-# Gather — Supabase setup
+# Gather — Worship & Ministry Planner
 
-This package replaces app.js and keeps your existing HTML/CSS. Email/password login is injected by app.js, so no HTML script changes are needed. The Supabase JS v2 client loads from jsDelivr. Keep an internet connection available.
+Gather remains a static HTML/CSS/JavaScript app backed by Supabase. Visitors can browse published worship schedules, themes, attendance locations, program order, and song titles immediately. Header buttons open the existing email/Google sign-in and registration forms. Password recovery, church approval, and the Admin workspace remain available. Existing service plans, ordered programs, volunteers, songs, printing, and private JSON backups use the same shared planner document.
 
-## 1. Back up before replacing
-Export a backup from your current Gather app. Keep a copy of your old app.js. The new version starts with an empty database and does not automatically upload sample or browser data. Your original browser data is left intact.
+**Source changes are local. The live Supabase migration/settings have not been applied, and no deployment was performed.** Complete the setup below before using this release.
 
-## 2. Create the database
-Create a project at https://supabase.com/dashboard. Open SQL Editor, paste setup.sql, and Run once. Copy the UUID returned by the insert. If already run, get the id from the gather_planners table instead. Do not rerun setup.sql on an existing installation.
+## 1. Upgrade your existing database
 
-## 3. Configure app.js
-Replace the three placeholders at the very top:
+1. Export a private backup from your existing Gather app and retain a database backup/snapshot if available.
+2. Open your existing Supabase project → SQL Editor → New query.
+3. **If the previous approval/Admin upgrade is already installed**, run only the complete [public-view migration](migrations/20261013_public_view.sql).
+4. **If your database still uses the original `setup.sql` schema**, run the [member-approval migration](migrations/20261013_member_approval.sql) first, then the [public-view migration](migrations/20261013_public_view.sql). The public migration requires the approval upgrade and aborts if it is missing.
+5. Confirm each transaction succeeds. A failure rolls back that migration; retain the error and fix its cause. Keep RLS enabled.
 
-```js
-const SUPABASE_URL = 'https://YOUR_PROJECT.supabase.co';
-const SUPABASE_PUBLISHABLE_KEY = 'YOUR_PUBLISHABLE_KEY';
-const CHURCH_ID = 'UUID_RETURNED_BY_SETUP';
+**Do not rerun `setup.sql` on an existing installation.** It creates original tables and a new church. Only a completely new project needs `setup.sql` first, member approval second, and public viewing third.
+
+Both upgrades preserve planner JSON, church IDs, and planner versions. The approval upgrade retains existing editor/viewer roles and approves their legacy memberships; new requests default to pending/viewer. Legacy request dates reflect the upgrade because the previous schema did not record them. Rerunning either migration preserves existing statuses, review timestamps, and planner records. The public migration never marks old records public.
+
+Authenticated users can read only their own membership. Church admins use restricted RPCs to list/review their church members. Private planner RLS permits reads only for approved, email-verified members and writes only for approved admins/editors. Profile metadata supplies display names only; church memberships determine roles. Signing in alone never grants editing permission.
+
+The new `gather_public_planner(p_church_id)` RPC constructs an explicit JSON allowlist inside PostgreSQL. Anonymous visitors and authenticated accounts can execute it for the selected church. It never returns the original planner document or grants anonymous SELECT access to `gather_planners`/`gather_members`. Anonymous writes and privileged admin RPCs remain denied. The existing approval workflow, church boundaries, last-admin guard, and optimistic planner-version guard stay in force.
+
+### Choose which records to publish
+
+Sign in as an approved editor/admin and edit a service. Enable **Publish this schedule, theme, and program for visitors**, review the public fields, and enter a **Public attendance location (optional)** if visitors should see where to attend. Edit each song you want listed publicly and enable **Publish this song title for visitors**. The service title, date, time, theme, and program titles/order/durations become public when its publication flag is enabled. Review this text before publishing.
+
+Existing records remain private until explicitly published, so the first public page may show an empty state. A private service location is never used as an attendance-location fallback. Leave the public attendance location blank to omit its text. Service preparation notes, volunteer contacts, song notes/keys/numbers, account emails, member records, and private backups never enter the public projection.
+
+Program assignments remain private by default. Enable **Show this assignment in the public program when its service is published** on an individual program item only when its volunteer/person name is intended for public viewing. Publishing a service alone does not publish its assignments. The volunteer directory is always private.
+
+The projection contract is `{ services: [...], songs: [...] }`. Service records allow only `id`, `title`, `date`, `time`, `theme`, `location`, and `program`; program items allow `title`, `minutes`, and optional explicitly published `person`; song records allow only `id` and `title`. Publication requires actual JSON booleans (`is_public: true` / `public_assignment: true`), never truthy strings. The client rejects unexpected/private response fields as an additional check; the database performs the privacy filtering before download.
+
+## 2. Promote your existing account to first admin
+
+If your approval upgrade already has an admin, skip this section. Otherwise:
+
+1. Ensure your existing account's email is verified.
+2. In Supabase Table Editor → `gather_planners`, copy your existing church's `id` UUID.
+3. In Authentication → Users, copy your account's user UUID.
+4. Open [sql/first-admin.sql](sql/first-admin.sql). Replace **both** `REPLACE_WITH_CHURCH_UUID` and `REPLACE_WITH_EXISTING_USER_UUID` with those explicit UUIDs.
+5. Paste the edited file into SQL Editor and Run once as the project owner, after the upgrade. It refuses an unverified account or a church that already has an approved admin.
+6. Sign in to Gather and click Refresh data; the Admin workspace appears.
+
+No registrant automatically becomes an admin. Manage subsequent approvals/roles inside Gather. Add a second trusted admin so another admin can manage your own account. Self-review is denied, and the database protects the last approved admin against removal/demotion, including concurrent actions. Refresh a stale member list before retrying.
+
+## 3. Public app configuration
+
+Your existing `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and `CHURCH_ID` at the top of [app.js](app.js) were preserved. Keep them unless intentionally connecting to a separate test project. A new installation needs the Project URL, publishable key, and church UUID.
+
+These are public browser values. Never put a `service_role` key, Supabase secret key, Google Client Secret, or SMTP password in browser code or GitHub. Google/SMTP secrets belong in Supabase dashboard settings.
+
+Public visitors use the publishable key and the database `anon` role without creating an Auth account. **Do not enable Supabase Anonymous Sign-Ins for this feature.** Keep your existing email, Google, SMTP, Site URL, and redirect settings. The SQL migration installs the public RPC permissions; there is no public table policy to add manually.
+
+This app has no build step. Plain browser JavaScript cannot automatically read Vercel environment variables; setting them alone will not configure Gather.
+
+## 4. Supabase email and redirect settings
+
+In Authentication → Sign In / Providers (or Providers), enable Email, allow new signups, and keep **Confirm email enabled**. Set minimum password length to at least 8. Gather requires matching 8–128 character passwords for registration/recovery. See [Supabase password authentication](https://supabase.com/docs/guides/auth/passwords).
+
+In Authentication → URL Configuration, substitute your actual domain:
+
+| Setting | Exact value/example |
+| --- | --- |
+| Site URL | `https://YOUR-SITE.vercel.app/` |
+| Redirect URL: development | `http://localhost:3000/` |
+| Redirect URL: production | `https://YOUR-SITE.vercel.app/` |
+| Custom domain, if used | `https://YOUR-DOMAIN/` |
+
+During local-only setup Site URL may be the localhost URL; change it to production when deploying. Gather returns to the current page with query/fragment removed for confirmation, Google, and reset. Match the path and trailing slash exactly. If you open `/index.html`, additionally allow `http://localhost:3000/index.html` and its production equivalent, or consistently open `/`. Other ports/preview domains need their own exact allowed URL. See [Supabase redirect configuration](https://supabase.com/docs/guides/auth/redirect-urls).
+
+Keep the default confirmation and Reset Password email links using `{{ .ConfirmationURL }}`. This browser app handles implicit callback sessions and `PASSWORD_RECOVERY` on the same page; it has no server `/auth/confirm` route. Restore the relevant default templates if another app customized them. See [Supabase email template variables](https://supabase.com/docs/guides/auth/auth-email-templates).
+
+Configure **Custom SMTP** before inviting ordinary church users. Supabase's default mail service restricts recipients to the project organization's team and has low sending limits. Signup/reset delivery may fail without SMTP. Follow [Supabase SMTP setup](https://supabase.com/docs/guides/auth/auth-smtp), keeping its credentials in the dashboard.
+
+Email registration creates the Auth account first. After confirming email, the person signs in and creates a pending church request. Church approval never confirms email. Password recovery saves a new password and signs out so the person can sign in again.
+
+## 5. Google authentication settings
+
+1. In Google Cloud Console → Google Auth Platform configure Branding and Audience. While in Testing, add the Google accounts you will test to its test-user list.
+2. Create an OAuth client with application type **Web application**.
+3. Add Authorized JavaScript origins `http://localhost:3000` and `https://YOUR-SITE.vercel.app`, plus your custom domain if used. Origins have no path/trailing slash.
+4. Add Authorized redirect URI `https://YOUR-PROJECT-REF.supabase.co/auth/v1/callback`. Copy the exact callback from Supabase's Google provider page. This Google callback goes to Supabase; final app URLs belong in Supabase's allowlist.
+5. In Supabase Authentication → Sign In / Providers → Google, enable Google and save the OAuth Client ID/Client Secret there. Leave skip-nonce-check disabled; Gather uses the OAuth redirect flow.
+
+These settings follow [Supabase Google sign-in documentation](https://supabase.com/docs/guides/auth/social-login/auth-google). Google enters the same pending workflow. Repeated sign-ins preserve approved, rejected, and revoked memberships.
+
+## 6. Run locally
+
+Install Node.js 22 or newer. In a terminal at this repository:
+
+```powershell
+npm.cmd run check
+npm.cmd test
+npm.cmd run dev
 ```
 
-Copy your Project URL and publishable API key from the project Connect dialog or Settings > API Keys. Do not use a secret or service_role key. These three configuration values are intentionally visible in browser code; access is enforced by SQL policies, not by hiding the URL/key.
+No npm dependencies need installing. On macOS/Linux use `npm` instead of `npm.cmd`. Open **http://localhost:3000/** and use Ctrl+C to stop. Actual authentication needs internet access for the SDK and Supabase. Do not open the app with `file://`.
 
-Replace app.js in your existing project with this one. Keep index.html and style.css alongside it. Test using VS Code Live Server, not file://.
+Browser sign-in connects to the project configured in `app.js`. Use a separate test Supabase project for experiments that should not affect your church. Automated tests never connect to those live configuration values.
 
-## 4. Configure email authentication
-In Supabase Authentication, enable email/password sign-in. Set Site URL to your deployed Vercel URL and add the exact localhost/Live Server URL you use under allowed Redirect URLs. Keep email confirmation enabled if you want confirmed addresses. Signup uses Supabase's configured Site URL for email confirmation redirects. This version supports signup, signin, and logout; a password-reset screen is not included. Administrators can use Supabase's dashboard password recovery options when needed.
+| Access | Planner | Private backups | Member administration |
+| --- | --- | --- | --- |
+| Visitor or pending/rejected/revoked account | Published services/programs/song titles; public printing | Hidden | None |
+| Approved viewer | Full private planner; view and print | Export | None |
+| Approved editor | Full private planner; edit services/programs/volunteers/songs and publication settings | Export and import | None |
+| Approved admin | Editor permissions | Export and import | Approve/reject, reconsider, revoke, change roles |
 
-## 5. Create an account and grant membership
-Open Gather and click Create account. If confirmation is enabled, check the email and confirm. In Supabase Authentication > Users, copy that account's UUID.
+Pending/rejected/revoked users see a nonblocking approval notice with Check status while continuing to browse public content. Approval defaults to Viewer unless an admin explicitly chooses another role. Admin controls include search, status filters/counts, confirmations, and reviewer/date details. Logout clears private data, open editing forms, and admin handlers, then returns to public browsing.
 
-Run in SQL Editor with actual values:
+Refresh data/Check status rechecks access. Focus, visibility changes, and a one-minute check also detect access changes while active. Database policies block future private access immediately; the interface updates when rechecked. Public loading/fetch errors have visible feedback and a retry action. Shared planner edits load with Refresh data; there is no realtime push. Stale versions cannot overwrite newer saves. A failed save reloads server data and explains the unsaved edit; re-enter it after refreshing. Import replaces the shared planner, including its publication choices, so coordinate imports.
 
-```sql
-insert into public.gather_members (church_id, user_id, role)
-values ('YOUR_CHURCH_UUID', 'YOUR_USER_UUID', 'editor');
+## 7. Verification: local results and live checklist
+
+Locally passed:
+
+- JavaScript syntax checks and **70 behavioral Node tests** with mocked Auth/RPC responses and a small DOM harness: logged-out public loading/navigation/errors, allowlisted response validation, hidden/guarded private tools, optional sign-in/registration/Google/recovery, pending/rejected public browsing, explicit publication/assignment choices, approved-role permissions, preserved admin actions and planner features, stale saves, logout clearing private state, and late async responses.
+- PostgreSQL 18 in a new isolated local cluster: **110 security assertions** (65 existing approval checks plus 45 public-interface checks), original-schema upgrade preserving legacy JSON/versions/membership roles, explicit bootstrap, unchanged migration reruns, and actual concurrent admin/direct-owner changes. Public checks execute anonymous/pending/viewer/editor/admin roles, verify exact projection contents and omission of private fields, deny anonymous writes/private reads and pending edits, allow editor writes, and preserve church/last-admin protection. Three concurrency cases cover admin RPC revocation and owner demotions under Read Committed/Repeatable Read.
+
+Mocked client denials alone do not prove RLS. The local PostgreSQL checks execute actual RLS/RPCs, using a minimal `auth.users`/`auth.uid()` fixture and synthetic JWT claims. They do not exercise hosted Auth/PostgREST.
+
+To repeat real SQL tests with installed Windows PostgreSQL:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File sql/test-local.ps1
+# If installed elsewhere:
+powershell -NoProfile -ExecutionPolicy Bypass -File sql/test-local.ps1 -PostgresBin "C:\path\to\PostgreSQL\bin"
 ```
 
-Click Refresh data after signing in. Accounts do not automatically get access. Add other members in the same way; use `viewer` for read-only access. Editors can modify/import all planner data; only the project owner managing Supabase can grant/revoke membership. This compact implementation uses one JSON document per church rather than separate tables for every record type.
+The runner creates/removes a temporary local cluster and uses [sql/security-tests.sql](sql/security-tests.sql) and [sql/public-security-tests.sql](sql/public-security-tests.sql). It checks both upgrade migrations and never connects to your live project.
 
-## 6. Restore existing records
-As an editor, import the backup exported in step 1. Import replaces the shared church planner for everyone, so coordinate with your team first. Export remains available to both editors and viewers.
+**Rendered browser appearance, responsive layout, and screenshots remain unverified.** Client behavior was checked with the Node DOM harness. Check the finished app in your desktop and mobile browser during the manual checklist below.
 
-## 7. Deploy
-Commit app.js to GitHub and let Vercel deploy. Keep Framework Preset Other and the Build Command blank. Plain static JS does not read Vercel environment variables automatically; set the three public values in app.js as described above.
+After setup, run these remaining **live** checks with test accounts:
 
-## 8. Test access and shared saving
-- Account A (editor): create a service and save.
-- Account B (editor): sign in in another browser, click Refresh data, confirm the service appears.
-- Account C (viewer): confirm records are readable, editing/import controls disabled, and direct database update is denied by RLS.
-- Account D (no membership): confirm no church data loads.
-- Open two editor tabs, edit/save in tab A, then edit/save stale tab B: tab B must report a conflict instead of overwriting A. Refresh tab B and re-enter the edit.
-- Disconnect internet, edit and save: the app must show Not saved and restore its last confirmed data.
-- Log out: church records must disappear and signin must be shown.
+1. Open Gather in an incognito/logged-out browser. Confirm public loading/empty/error states, service/program/song browsing, clear Sign in/Register buttons, public printing, and desktop/mobile layout. Editing, volunteer directory, backups/import, and Admin controls should be hidden.
+2. As an approved editor, publish a test service and song title, set a distinct public attendance location, and explicitly publish just one program assignment. Inspect the `gather_public_planner` response in browser Network tools while logged out: only the documented allowlist should appear. Private locations/notes/contacts/emails/member rows/backups and unmarked assignments must be absent. Unpublish it and confirm it disappears after Refresh schedules. Anonymous direct private-table reads, writes, and admin RPCs must fail.
+3. Register, receive/confirm the email, and sign in. Before confirmation no church request should exist. Afterwards the person sees a pending notice and public content without any private planner fetch. Direct private reads/edits must fail. Sign in with Google; confirm redirects, the same pending workflow, saved-session restoration, and a cancelled OAuth callback that can be dismissed.
+4. As admin approve as Viewer; Check status should reveal existing private records read-only. A direct planner update using that person's authenticated token must fail. Approve another test account as Editor and verify authenticated edits/publication. Editor member-list/review RPCs and cross-church private reads/admin actions must fail.
+5. Reject/reconsider/revoke access; later sign-ins must preserve statuses and public browsing. Recheck a revoked session and confirm protected records/forms disappear. Self-review/last-admin removal must fail; test simultaneous admin actions.
+6. Receive/follow a password-reset email, save a matching new password, and sign in again. Cancel recovery to return to public browsing. Expired links should show useful feedback.
+7. In two editor sessions, save in one and attempt a stale save in the other: it must report a conflict. Verify service/program/volunteer/song editing, assignment/order, private printing, and backups. Logout must clear protected records/forms/Admin handlers while keeping public schedules available.
 
-Shared changes appear after Refresh data or page reload; realtime push updates are not included. Saves use a version condition, so stale edits are rejected. Failed edits are rolled back; re-enter them after Refresh data. This is a connected starter, not a verified deployment to your own Supabase project.
+**Live migration application, email delivery/verification, Google consent/redirects, hosted RLS/PostgREST, and deployment remain unverified.**
+
+## 8. GitHub/Vercel deployment
+
+1. Run the checks, review changes, then commit/push to your GitHub repository.
+2. Import/retain the repository's Vercel Git integration. Choose Framework Preset **Other**, repository root, an empty/disabled Build Command override, and Output Directory **`.`**. No Install Command is needed because there are no dependencies. See [Vercel build configuration](https://vercel.com/docs/builds/configure-a-build).
+3. Deploy through Vercel. Set the actual production URL in Supabase Site URL/Redirect URLs and Google's origins.
+4. Perform the live checklist before inviting your church.
+
+Public source assets are `index.html`, `style.css`, `auth.js`, `access.js`, `admin.js`, and `app.js`. Keep credentials out of every repository file. Local test artifacts under `.local-qa` should not be committed.
