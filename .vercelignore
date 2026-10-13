@@ -1,0 +1,13 @@
+# Upload only public assets and deployment metadata.
+/*
+!index.html
+!style.css
+!config.js
+!planner.js
+!render.js
+!access.js
+!admin.js
+!auth.js
+!app.js
+!vercel.json
+!package.json

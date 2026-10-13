@@ -10,7 +10,7 @@ const rows = [
   { church_id: 'church-a', user_id: 'rejected-a', full_name: 'Rejected Person', email: 'rejected@example.test', status: 'rejected', role: 'viewer', requested_at: '2026-10-13T00:00:00Z', updated_at: '2026-10-13T00:00:00Z' }
 ];
 
-async function fixture({ allowed = true, confirm = true, listResult = rows, reviewError = null } = {}) {
+async function fixture({ allowed = true, confirm = true, listResult = rows, reviewError = null, reviewResult = null, recheckError = null } = {}) {
   const calls = [];
   const fields = new Map();
   const container = {
@@ -25,24 +25,28 @@ async function fixture({ allowed = true, confirm = true, listResult = rows, revi
     async review(client, church, member, kind, role) {
       calls.push(['review', church, member.user_id, kind, role]);
       if (reviewError) throw reviewError;
+      if (reviewResult) return await reviewResult;
       return { ...member, status: kind === 'reopen' ? 'pending' : kind === 'approve' ? 'approved' : kind === 'revoke' ? 'revoked' : 'rejected', role };
     }
   };
   const context = vm.createContext({ window: { confirm(label) { calls.push(['confirm', label]); return confirm; } }, GatherAccess: access });
+  vm.runInContext(readFileSync(new URL('../planner.js', import.meta.url), 'utf8'), context);
+  context.GatherPlanner = context.window.GatherPlanner;
   vm.runInContext(readFileSync(new URL('../admin.js', import.meta.url), 'utf8'), context);
   const admin = context.window.GatherAdmin;
-  admin.mount({
+  const options = {
     container, client: {}, churchId: 'church-a', userId: 'admin-a',
     isAdmin: () => allowed,
-    recheck: async () => { calls.push(['recheck']); },
+    recheck: async () => { calls.push(['recheck']); if (recheckError) throw recheckError; },
     notify: message => { calls.push(['notify', message]); }
-  });
+  };
+  admin.mount(options);
   await flush();
   return {
-    admin, container, calls, fields,
+    admin, container, calls, fields, options,
     async click(dataset, id = '') {
       const button = { dataset, id };
-      container.onclick({ target: { closest: () => button } });
+      container.onclick?.({ target: { closest: () => button } });
       await flush();
     },
     async filter(value) { container.onchange({ target: { id: 'member-status', value } }); await flush(); }
@@ -136,4 +140,73 @@ test('clearing the workspace discards late private member responses', async () =
   assert.equal(f.container.innerHTML, 'Signed out');
   await f.click({ member: 'pending-a', memberAction: 'approve' });
   assert.equal(f.calls.some(c => c[0] === 'review'), false);
+});
+
+test('selected approval role survives searching and switching status filters', async () => {
+  const f = await fixture();
+  f.fields.set('[data-member-role="pending-a"]', { value: 'editor' });
+  f.container.onchange({ target: { dataset: { memberRole: 'pending-a' }, value: 'editor' } });
+  f.container.oninput({ target: { id: 'member-search', value: 'Pending', selectionStart: 7 } });
+  assert.match(f.container.innerHTML, /data-member-role="pending-a"[^>]*>[\s\S]*?value="editor" selected/);
+  await f.filter('approved');
+  await f.filter('pending');
+  assert.match(f.container.innerHTML, /data-member-role="pending-a"[^>]*>[\s\S]*?value="editor" selected/);
+  await f.click({ member: 'pending-a', memberAction: 'approve' });
+  assert.deepEqual(f.calls.find(c => c[0] === 'review'), ['review', 'church-a', 'pending-a', 'approve', 'editor']);
+});
+
+test('mounting the same workspace again preserves filters without reloading member data', async () => {
+  const f = await fixture();
+  await f.filter('rejected');
+  f.admin.mount({ ...f.options });
+  await flush();
+  assert.equal(f.calls.filter(c => c[0] === 'list').length, 1);
+  assert.match(f.container.innerHTML, /value="rejected" selected/);
+  assert.match(f.container.innerHTML, /Rejected Person/);
+});
+
+test('a page redraw during approval retains the pending request and blocks duplicate actions', async () => {
+  let finishReview;
+  const reviewResult = new Promise(resolve => { finishReview = resolve; });
+  const f = await fixture({ reviewResult });
+  await f.click({ member: 'pending-a', memberAction: 'approve' });
+  f.admin.mount({ ...f.options });
+  assert.match(f.container.innerHTML, /Saving access change/);
+  await f.click({ member: 'pending-a', memberAction: 'approve' });
+  assert.equal(f.calls.filter(c => c[0] === 'review').length, 1);
+  assert.equal(f.calls.filter(c => c[0] === 'list').length, 1);
+  finishReview({ ...rows[1], status: 'approved' });
+  await flush();
+  assert.match(f.container.innerHTML, /Access updated/);
+  assert.match(f.container.innerHTML, /No pending members/);
+});
+
+test('clear removes private member markup and its event handlers immediately', async () => {
+  const f = await fixture();
+  assert.match(f.container.innerHTML, /pending@example.test/);
+  f.admin.clear();
+  assert.equal(f.container.innerHTML, '');
+  assert.equal(f.container.onclick, null);
+  assert.equal(f.container.oninput, null);
+  assert.equal(f.container.onchange, null);
+});
+
+test('losing admin permission during a member request discards private results and handlers', async () => {
+  let finishList;
+  const listResult = new Promise(resolve => { finishList = resolve; });
+  const f = await fixture({ listResult });
+  f.admin.mount({ ...f.options, isAdmin: () => false });
+  finishList(rows);
+  await flush();
+  assert.equal(f.container.innerHTML, '');
+  assert.equal(f.container.onclick, null);
+  assert.equal(f.calls.some(c => c[0] === 'review'), false);
+});
+
+test('a failed access recheck after a failed member action remains a handled error', async () => {
+  const f = await fixture({ reviewError: new Error('The membership changed'), recheckError: new Error('Network connection failed') });
+  await f.click({ member: 'pending-a', memberAction: 'approve' });
+  assert.match(f.container.innerHTML, /The membership changed/);
+  assert.match(f.container.innerHTML, /Access could not be checked: Network connection failed/);
+  assert.doesNotMatch(f.container.innerHTML, /Access updated/);
 });

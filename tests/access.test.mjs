@@ -4,6 +4,8 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const context = vm.createContext({ window: {} });
+vm.runInContext(readFileSync(new URL('../planner.js', import.meta.url), 'utf8'), context);
+context.GatherPlanner = context.window.GatherPlanner;
 vm.runInContext(readFileSync(new URL('../access.js', import.meta.url), 'utf8'), context);
 const access = context.window.GatherAccess;
 const church = 'church-a';
@@ -60,7 +62,7 @@ test('malformed public responses fail closed and projection errors remain visibl
 
 function fakeClient({ member = membership(), currentUser = user, plannerError = null, writeResult = { data: { version: 8 }, error: null } } = {}) {
   const calls = [];
-  const planner = { data: { services: [{ id: 'existing-service', title: 'Existing service' }], team: [], songs: [] }, version: 7 };
+  const planner = { data: { services: [{ id: 'existing-service', title: 'Existing service', date: '2026-10-18', time: '09:00', program: [] }], team: [], songs: [] }, version: 7 };
   const query = {
     select(value) { calls.push(['select', value]); return this; },
     eq(column, value) { calls.push(['eq', column, value]); return this; },
@@ -168,7 +170,7 @@ test('save uses church and exact version conditions, leaving stale writes reject
 
 test('direct write and admin RPC backend denials are surfaced to the client', async () => {
   const denied = { message: 'permission denied', code: '42501' };
-  await assert.rejects(access.save(fakeClient({ writeResult: { data: null, error: denied } }), church, {}, 7), error => error === denied);
+  await assert.rejects(access.save(fakeClient({ writeResult: { data: null, error: denied } }), church, { services: [], team: [], songs: [] }, 7), error => error === denied);
   const client = fakeClient();
   client.rpc = async () => ({ data: null, error: denied });
   await assert.rejects(access.list(client, church), error => error === denied);
@@ -193,4 +195,27 @@ test('review defaults to viewer, supplies stale-review token, and rejects cross-
   await assert.rejects(access.review(client, church, { ...member, church_id: 'church-b' }, 'approve'), /different church/);
   await assert.rejects(access.review(client, church, { ...member, updated_at: null }, 'approve'), /Reload/);
   assert.equal(client.calls.length, 1);
+});
+
+test('a malformed successful write response cannot be reported as a confirmed save', async () => {
+  for (const data of [{}, { version: '8' }, { version: 7 }, { version: 9 }]) {
+    const client = fakeClient({ writeResult: { data, error: null } });
+    await assert.rejects(access.save(client, church, { services: [], team: [], songs: [] }, 7), /could not be confirmed/);
+  }
+});
+
+test('malformed membership rows and unsafe attribute identifiers fail before rendering or planner reads', async () => {
+  for (const member of [null, [], { ...membership(), user_id: '\"><img src=x>' }, { ...membership(), full_name: {} }]) {
+    const client = fakeClient({ member: [member] });
+    await assert.rejects(access.list(client, church), /could not be verified/);
+  }
+  const client = fakeClient({ member: [membership(), membership()] });
+  await assert.rejects(access.refresh(client, church), /response is invalid/);
+  assert.equal(client.calls.some(call => call[0] === 'from'), false);
+});
+
+test('a private refresh cannot adopt a different identity before that session is verified', async () => {
+  const client = fakeClient();
+  await assert.rejects(access.refresh(client, church, 'previous-account'), error => error.code === 'GATHER_SESSION_CHANGED');
+  assert.deepEqual(client.calls, [['getUser']]);
 });

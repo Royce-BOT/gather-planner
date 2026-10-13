@@ -1,4 +1,4 @@
--- Run AFTER both migrations, as postgres, in a disposable development database.
+-- Run AFTER all three migrations, as postgres, in a disposable development database.
 -- Creates fake users/claims; no Auth/OAuth delivery test. All changes roll back.
 -- Stop on the first error. The local test-local.ps1 runner executes this file.
 begin;
@@ -56,6 +56,8 @@ insert into public.gather_planners(id, name, data, version) values
 ('f4100000-0000-4000-8000-000000000001', 'Private Church Name', $json$
 {
   "services": [
+    {"id":"public-service","title":"PRIVATE INVALID FIRST DUPLICATE","date":"2026-02-30","time":"09:00","is_public":true},
+    {"id":"public-service","title":"PRIVATE UNPUBLISHED FIRST DUPLICATE","date":"2026-10-18","time":"09:00"},
     {"id":"public-service","title":"Sunday Worship","date":"2026-10-18","time":"09:00",
      "theme":"Hope","is_public":true,"public_location":"Main Sanctuary",
      "location":"PRIVATE HOME ADDRESS","notes":"PRIVATE PREPARATION NOTES",
@@ -83,6 +85,12 @@ insert into public.gather_planners(id, name, data, version) values
     {"id":"string-opt-in","title":"PRIVATE STRING SERVICE","is_public":"true"},
     {"id":"false-opt-in","title":"PRIVATE FALSE SERVICE","is_public":false},
     {"id":"public-no-location","title":"Public Without Address","date":"2026-10-19","time":"19:00","is_public":true,"location":"PRIVATE LEGACY LOCATION"},
+    {"id":"public-service","title":"Later Published Duplicate","date":"2026-10-18","time":"09:00","is_public":true},
+    {"id":"public-leap-day","title":"Leap Day Worship","date":"2028-02-29","time":"00:00","is_public":true},
+    {"id":"invalid-february","title":"PRIVATE FEBRUARY 30","date":"2026-02-30","time":"09:00","is_public":true},
+    {"id":"invalid-leap-day","title":"PRIVATE NONLEAP DAY","date":"2026-02-29","time":"09:00","is_public":true},
+    {"id":"invalid-april","title":"PRIVATE APRIL 31","date":"2026-04-31","time":"09:00","is_public":true},
+    {"id":"invalid-year-zero","title":"PRIVATE YEAR ZERO","date":"0000-01-01","time":"09:00","is_public":true},
     {"id":"invalid-date","title":"PRIVATE MALFORMED DATE","date":"2026-99-99","time":"09:00","is_public":true},
     {"id":"invalid-time","title":"PRIVATE MALFORMED TIME","date":"2026-10-18","time":"29:99","is_public":true},
     {"id":"invalid-id!","title":"PRIVATE MALFORMED ID","date":"2026-10-18","time":"09:00","is_public":true},
@@ -92,7 +100,10 @@ insert into public.gather_planners(id, name, data, version) values
      "program":{"notes":"PRIVATE PROGRAM OBJECT"},"is_public":true}
   ],
   "songs":[
+    {"id":"public-song","title":"PRIVATE UNPUBLISHED FIRST SONG"},
+    {"id":"public-song","title":"   ","is_public":true},
     {"id":"public-song","title":"Amazing Grace","is_public":true,"key":"D","number":"42","notes":"PRIVATE SONG NOTES","email":"private-song@example.invalid"},
+    {"id":"public-song","title":"Later Published Song","is_public":true},
     {"id":"private-song","title":"PRIVATE SONG"},
     {"id":"string-song","title":"PRIVATE STRING SONG","is_public":"true"},
     {"id":{"secret":"PRIVATE SONG ID"},"title":{"secret":"PRIVATE SONG TITLE"},"is_public":true}
@@ -129,7 +140,8 @@ select set_config('gather.public_expected', $json$
        {"title":"Integral decimal duration","minutes":5},
        {"title":"Maximum duration","minutes":300}
      ]},
-    {"id":"public-no-location","title":"Public Without Address","date":"2026-10-19","time":"19:00","theme":"","location":"","program":[]}
+    {"id":"public-no-location","title":"Public Without Address","date":"2026-10-19","time":"19:00","theme":"","location":"","program":[]},
+    {"id":"public-leap-day","title":"Leap Day Worship","date":"2028-02-29","time":"00:00","theme":"","location":"","program":[]}
   ],
   "songs":[{"id":"public-song","title":"Amazing Grace"}]
 }
@@ -142,12 +154,27 @@ select pg_temp.gather_assert(not has_table_privilege('anon','public.gather_plann
   and not has_table_privilege('anon','public.gather_members','SELECT'), 'anonymous roles have no private table SELECT grants');
 select pg_temp.gather_assert((select bool_and(relrowsecurity) from pg_class
   where oid in ('public.gather_planners'::regclass,'public.gather_members'::regclass)), 'RLS remains enabled on both private tables');
+select pg_temp.gather_assert(gather_private.gather_valid_date('0001-01-01')
+  and gather_private.gather_valid_date('9999-12-31')
+  and gather_private.gather_valid_date('2000-02-29')
+  and not gather_private.gather_valid_date('1900-02-29')
+  and not gather_private.gather_valid_date('2026-02-30')
+  and not gather_private.gather_valid_date('0000-01-01')
+  and not gather_private.gather_valid_date(null)
+  and not gather_private.gather_valid_date('2026-2-1'),
+  'public calendar validation accepts real leap dates and rejects impossible days and year zero');
+select pg_temp.gather_assert(not has_function_privilege('anon','gather_private.gather_valid_date(text)','EXECUTE')
+  and not has_function_privilege('authenticated','gather_private.gather_valid_date(text)','EXECUTE'),
+  'calendar helper is private to the public projection owner');
 
 set local role anon;
 select pg_temp.gather_actor(null);
 select pg_temp.gather_assert(public.gather_public_planner('f4100000-0000-4000-8000-000000000001') =
   current_setting('gather.public_expected')::jsonb,
   'logged-out API returns exact allowlist at every nested level and preserves program order');
+select pg_temp.gather_assert(jsonb_array_length(public.gather_public_planner('f4100000-0000-4000-8000-000000000001')->'services') = 3
+  and jsonb_array_length(public.gather_public_planner('f4100000-0000-4000-8000-000000000001')->'songs') = 1,
+  'malformed dates and duplicate public IDs cannot break browsing or shadow first valid published entries');
 select pg_temp.gather_assert(public.gather_public_planner('f4100000-0000-4000-8000-000000000001')::text !~ 'PRIVATE|@example.invalid',
   'public response contains no private field values, volunteer contacts, accounts, notes or backups');
 select pg_temp.gather_assert(public.gather_public_planner('f4100000-0000-4000-8000-000000000002')->'services'->0->>'id' = 'other-service'
@@ -203,7 +230,7 @@ with changed as (update public.gather_planners set data = data, version = versio
 select pg_temp.gather_assert((select count(*) = 0 from changed), 'approved viewer remains read-only');
 
 select pg_temp.gather_actor('f4000000-0000-4000-8000-000000000003');
-with changed as (update public.gather_planners set data = jsonb_set(data,'{services,0,is_public}','false'::jsonb), version = version + 1
+with changed as (update public.gather_planners set data = jsonb_set(data,'{services,2,is_public}','false'::jsonb), version = version + 1
   where id = 'f4100000-0000-4000-8000-000000000001' and version = 40 returning version)
 select pg_temp.gather_assert((select count(*) = 1 and min(version) = 41 from changed), 'approved editor writes private planner and increments version');
 with changed as (update public.gather_planners set data = data, version = version + 1
@@ -220,7 +247,15 @@ select pg_temp.gather_denied($q$select public.gather_list_members('f4100000-0000
 reset role;
 set local role anon;
 select pg_temp.gather_actor(null);
-select pg_temp.gather_assert(jsonb_array_length(public.gather_public_planner('f4100000-0000-4000-8000-000000000001')->'services') = 1,
+select pg_temp.gather_assert(jsonb_array_length(public.gather_public_planner('f4100000-0000-4000-8000-000000000001')->'services') = 3
+  and public.gather_public_planner('f4100000-0000-4000-8000-000000000001')->'services'->1->>'title' = 'Later Published Duplicate',
+  'unpublishing the first duplicate reveals the next explicitly published duplicate');
+reset role;
+-- Remove the duplicate fixture too so subsequent reads model a unique service.
+update public.gather_planners set data = jsonb_set(data,'{services,7,is_public}','false'::jsonb), version = version + 1
+where id = 'f4100000-0000-4000-8000-000000000001';
+set local role anon;
+select pg_temp.gather_assert(jsonb_array_length(public.gather_public_planner('f4100000-0000-4000-8000-000000000001')->'services') = 2,
   'unpublishing removes service from subsequent public API reads');
 reset role;
 

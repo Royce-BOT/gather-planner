@@ -1,4 +1,4 @@
--- Run AFTER the migration in Supabase SQL Editor, as postgres, preferably in a
+-- Run AFTER all three migrations in Supabase SQL Editor, as postgres, preferably in a
 -- separate development project. This file creates fake accounts/claims only;
 -- it does not test Supabase Auth emails, OAuth, or delivery. EVERYTHING rolls back.
 -- Stop on the first error. A successful run prints PASS notices and ROLLBACK.
@@ -93,6 +93,10 @@ select pg_temp.gather_denied($q$select public.gather_request_access('f1000000-00
   'anonymous request RPC denied');
 select pg_temp.gather_denied($q$select public.gather_list_members('f1000000-0000-4000-8000-000000000001')$q$,
   'anonymous listing RPC denied');
+select pg_temp.gather_denied($q$select gather_private.gather_can_access('f1000000-0000-4000-8000-000000000001', true)$q$,
+  'anonymous private policy helper denied');
+select pg_temp.gather_denied($q$select gather_private.gather_authorize_planner_write('f1000000-0000-4000-8000-000000000001')$q$,
+  'anonymous editor write authorization denied');
 reset role;
 
 set local role authenticated;
@@ -118,6 +122,8 @@ select pg_temp.gather_denied($q$update public.gather_members set status = 'appro
 select pg_temp.gather_denied($q$insert into public.gather_members(church_id, user_id, role, status)
   values ('f1000000-0000-4000-8000-000000000002', 'f0000000-0000-4000-8000-000000000005', 'admin', 'approved')$q$,
   'self privileged membership insertion denied');
+select pg_temp.gather_denied($q$select gather_private.gather_authorize_planner_write('f1000000-0000-4000-8000-000000000001')$q$,
+  'pending user cannot bypass approval through write authorization helper');
 select pg_temp.gather_denied($q$select public.gather_list_members('f1000000-0000-4000-8000-000000000001')$q$,
   'pending account cannot list private members');
 
@@ -141,6 +147,8 @@ select pg_temp.gather_denied($q$update public.gather_planners set name = 'unauth
   where id = 'f1000000-0000-4000-8000-000000000001'$q$, 'viewer cannot update ungranted columns');
 select pg_temp.gather_denied($q$select public.gather_list_members('f1000000-0000-4000-8000-000000000001')$q$,
   'viewer cannot list private members');
+select pg_temp.gather_denied($q$select gather_private.gather_authorize_planner_write('f1000000-0000-4000-8000-000000000001')$q$,
+  'viewer cannot acquire editor write authorization');
 select pg_temp.gather_denied($q$select public.gather_review_member('f1000000-0000-4000-8000-000000000001',
   'f0000000-0000-4000-8000-000000000005', 'approve', 'admin', now())$q$, 'viewer cannot approve or choose privileged role');
 
@@ -158,6 +166,25 @@ with changed as (update public.gather_planners set data = data, version = 8
 select pg_temp.gather_assert((select count(*) = 0 from changed), 'stale planner version cannot overwrite newer save');
 select pg_temp.gather_denied($q$update public.gather_planners set version = version + 2
   where id = 'f1000000-0000-4000-8000-000000000001'$q$, 'planner version trigger remains active', array['P0001']);
+select pg_temp.gather_denied($q$update public.gather_planners set data = '{}'::jsonb, version = version + 1
+  where id = 'f1000000-0000-4000-8000-000000000001'$q$, 'missing planner arrays denied even for editor', array['23514']);
+select pg_temp.gather_denied($q$update public.gather_planners set data = '{"services":[],"team":null,"songs":[]}'::jsonb, version = version + 1
+  where id = 'f1000000-0000-4000-8000-000000000001'$q$, 'null planner array denied even for editor', array['23514']);
+select pg_temp.gather_denied($q$update public.gather_planners set data = '{"services":[],"team":[],"songs":"invalid"}'::jsonb, version = version + 1
+  where id = 'f1000000-0000-4000-8000-000000000001'$q$, 'wrong planner array type denied even for editor', array['23514']);
+select pg_temp.gather_assert((select version = 8 and data->>'fixture' = 'preserve-me'
+  from public.gather_planners where id = 'f1000000-0000-4000-8000-000000000001'),
+  'failed malformed writes preserve planner JSON and version');
+select pg_temp.gather_denied('select * from gather_private.gather_membership_locks', 'authenticated membership lock rows denied');
+select pg_temp.gather_denied($q$select gather_private.gather_lock_church('f1000000-0000-4000-8000-000000000001')$q$,
+  'authenticated private lock function denied');
+select pg_temp.gather_denied('select public.gather_check_version()', 'planner trigger cannot be called as an authenticated RPC');
+select pg_temp.gather_denied('select gather_private.gather_planner_write_guard()', 'planner access guard cannot be called as an authenticated RPC');
+select pg_temp.gather_assert((select prosecdef and provolatile='v' and proconfig=array['search_path=""']
+  from pg_proc where oid='gather_private.gather_authorize_planner_write(uuid)'::regprocedure),
+  'write authorization uses volatile snapshots and an empty search path');
+select pg_temp.gather_denied($q$select gather_private.gather_authorize_planner_write('f1000000-0000-4000-8000-000000000002')$q$,
+  'editor write authorization cannot cross church boundary');
 select pg_temp.gather_assert((select count(*) = 0 from public.gather_planners
   where id = 'f1000000-0000-4000-8000-000000000002'), 'cross church planner access denied');
 select pg_temp.gather_denied($q$select public.gather_list_members('f1000000-0000-4000-8000-000000000001')$q$,
@@ -283,6 +310,24 @@ select pg_temp.gather_assert((select snapshot from gather_security_baseline wher
   (select coalesce(jsonb_agg(to_jsonb(m) order by m.church_id, m.user_id), '[]'::jsonb) from public.gather_members m
    where m.church_id not in ('f1000000-0000-4000-8000-000000000001', 'f1000000-0000-4000-8000-000000000002')),
   'existing memberships remain untouched by tests');
+
+-- An exhausted integer version must fail rather than wrap or overwrite data.
+savepoint version_limit_fixture;
+insert into public.gather_planners(id,name,data,version) values
+  ('f1000000-0000-4000-8000-000000000003','Version limit fixture',
+   '{"services":[],"team":[],"songs":[],"fixture":"version-limit-preserve"}',2147483647);
+insert into public.gather_members(church_id,user_id,role,status) values
+  ('f1000000-0000-4000-8000-000000000003','f0000000-0000-4000-8000-000000000003','editor','approved');
+set local role authenticated;
+select pg_temp.gather_actor('f0000000-0000-4000-8000-000000000003');
+select pg_temp.gather_denied($q$update public.gather_planners set version=-2147483648,
+  data='{"services":[],"team":[],"songs":[]}'::jsonb
+  where id='f1000000-0000-4000-8000-000000000003'$q$, 'planner version overflow cannot wrap into a successful save', array['22003']);
+select pg_temp.gather_assert((select version=2147483647 and data->>'fixture'='version-limit-preserve'
+  from public.gather_planners where id='f1000000-0000-4000-8000-000000000003'),
+  'version overflow leaves persisted planner unchanged');
+reset role;
+rollback to version_limit_fixture;
 rollback;
 
 -- Concurrency verification needs two database connections, so it cannot be

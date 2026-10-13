@@ -287,6 +287,8 @@ p {
     margin-bottom: 22px
 }
 
+.theme-title { margin-top: 10px; }
+
 .textbutton {
     border: 0;
     background: none;

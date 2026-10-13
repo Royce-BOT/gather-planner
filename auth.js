@@ -3,16 +3,25 @@
     'use strict';
     const $ = id => document.getElementById(id);
     const RECOVERY_KEY = 'gather-password-recovery';
+    const SIGNOUT_KEY = 'gather-signout-pending';
     const labels = { signin: 'Sign in', register: 'Create account', reset: 'Send reset link', recovery: 'Save new password' };
     let client = null, callbacks = {}, mode = 'signin', busy = false, ready = false;
     let user = null, recovery = false, locallySignedOut = false, lifecycle = 0, eventTimer = null;
-    let subscription = null, retryAction = null, startPromise = null, suppressSignedOutMessage = false;
+    let subscription = null, retryAction = null, startPromise = null, logoutPromise = null, suppressSignedOutMessage = false;
+    let actionPromise = null, actionRevision = 0;
 
     function storedRecovery() {
         try { return window.sessionStorage.getItem(RECOVERY_KEY) || ''; } catch { return ''; }
     }
     function rememberRecovery(id = '') {
         try { id ? window.sessionStorage.setItem(RECOVERY_KEY, id) : window.sessionStorage.removeItem(RECOVERY_KEY); } catch { /* Private browsing may disable storage. */ }
+    }
+    function pendingSignout(value) {
+        try {
+            if (value === undefined) return window.sessionStorage.getItem(SIGNOUT_KEY) === 'true';
+            value ? window.sessionStorage.setItem(SIGNOUT_KEY, 'true') : window.sessionStorage.removeItem(SIGNOUT_KEY);
+        } catch { /* Private browsing may disable storage. */ }
+        return false;
     }
     function status(message = '', kind = 'info') {
         $('auth-status').textContent = message;
@@ -28,12 +37,13 @@
         clearPasswords();
     }
     function controls() {
-        document.querySelectorAll('[data-auth-control]').forEach(element => { element.disabled = busy || !ready; });
-        $('auth-name').disabled = busy || !ready || mode !== 'register';
-        $('auth-email').disabled = busy || !ready || mode === 'recovery';
-        $('auth-password').disabled = busy || !ready || mode === 'reset';
-        $('auth-confirm').disabled = busy || !ready || !['register', 'recovery'].includes(mode);
-        $('auth-panel').setAttribute('aria-busy', String(busy));
+        const locked = busy || Boolean(logoutPromise);
+        document.querySelectorAll('[data-auth-control]').forEach(element => { element.disabled = locked || !ready; });
+        $('auth-name').disabled = locked || !ready || mode !== 'register';
+        $('auth-email').disabled = locked || !ready || mode === 'recovery';
+        $('auth-password').disabled = locked || !ready || mode === 'reset';
+        $('auth-confirm').disabled = locked || !ready || !['register', 'recovery'].includes(mode);
+        $('auth-panel').setAttribute('aria-busy', String(locked));
         $('auth-submit').textContent = labels[mode];
     }
     function setBusy(value, label = '') {
@@ -135,15 +145,19 @@
         return password;
     }
     async function action(work, label) {
-        if (busy) return false;
+        if (busy || logoutPromise) return false;
         if (!client || !ready) { status('Gather is still connecting. Please try again in a moment.', 'error'); return false; }
         retryAction = null;
         $('auth-retry').hidden = true;
         status();
         setBusy(true, label);
-        try { await work(); return true; }
-        catch (error) { status(friendlyError(error), 'error'); return false; }
-        finally { setBusy(false); }
+        const revision = actionRevision;
+        actionPromise = (async () => {
+            try { return (await work(() => revision === actionRevision)) !== false; }
+            catch (error) { if (revision === actionRevision) status(friendlyError(error), 'error'); return false; }
+            finally { actionPromise = null; setBusy(false); }
+        })();
+        return actionPromise;
     }
     function notifySignedOut() {
         user = null;
@@ -157,10 +171,12 @@
     async function receiveSession(session, event, ticket) {
         if (ticket !== lifecycle || locallySignedOut) return;
         if (!session) {
+            const wasRecovery = recovery;
             recovery = false;
             rememberRecovery();
             notifySignedOut();
-            hide();
+            if (wasRecovery) show('reset', 'This reset link has expired. Request a new one below.');
+            else hide();
             return;
         }
         try {
@@ -176,8 +192,8 @@
                 notifySignedOut();
                 show('signin', 'Verify your email using the link in your inbox, then sign in to request church access.');
                 suppressSignedOutMessage = true;
-                await client.auth.signOut({ scope: 'local' });
-                suppressSignedOutMessage = false;
+                try { await client.auth.signOut({ scope: 'local' }); }
+                finally { suppressSignedOutMessage = false; }
                 return;
             }
             user = verified;
@@ -197,14 +213,16 @@
             user = null;
             callbacks.onSignedOut?.();
             if (recovery) {
-                recovery = false;
-                rememberRecovery();
-                show('reset', 'This reset link could not be verified. Request a new link below.');
+                // A network failure does not invalidate the saved recovery session.
+                // Keep its marker until verification succeeds or sign-out completes.
+                show('recovery');
+                status('This reset session could not be verified. Retry or cancel recovery. ' + friendlyError(error), 'error');
             } else {
                 if (wasAuthOpen) show('signin');
                 status(friendlyError(error), 'error');
             }
             retryAction = () => checkSession();
+            $('auth-retry').textContent = 'Try again';
             $('auth-retry').hidden = false;
             callbacks.onError?.(error);
         }
@@ -218,7 +236,8 @@
     function authEvent(event, session) {
         if (event === 'SIGNED_OUT') {
             cancelPending();
-            locallySignedOut = true;
+            // A natural expiry/cross-tab logout must permit a later SIGNED_IN.
+            locallySignedOut = Boolean(logoutPromise) || pendingSignout();
             recovery = false;
             rememberRecovery();
             notifySignedOut();
@@ -241,96 +260,121 @@
     }
     async function checkSession() {
         if (!client || locallySignedOut) return false;
-        const ticket = ++lifecycle;
+        cancelPending();
+        const ticket = lifecycle;
         try {
             const { data, error } = await client.auth.getSession();
+            if (ticket !== lifecycle || locallySignedOut) return false;
             if (error) throw error;
             await receiveSession(data.session, 'SESSION_RECHECK', ticket);
-            return Boolean(user);
+            return ticket === lifecycle && Boolean(user) && !recovery;
         } catch (error) {
+            if (ticket !== lifecycle || locallySignedOut) return false;
             user = null;
             callbacks.onSignedOut?.();
             status(friendlyError(error), 'error');
+            retryAction = checkSession;
+            $('auth-retry').textContent = 'Try again';
+            $('auth-retry').hidden = false;
             callbacks.onError?.(error);
             return false;
         }
     }
     async function signIn(values) {
-        return action(async () => {
+        return action(async isCurrent => {
             const email = emailValue(values), password = passwordValue(values);
             const { data, error } = await client.auth.signInWithPassword({ email, password });
+            if (!isCurrent()) return false;
             if (error) throw error;
             locallySignedOut = false;
+            pendingSignout(false);
             clearPasswords();
             scheduleSession(data.session, 'SIGNED_IN');
         }, 'Signing in…');
     }
     async function register(values) {
-        return action(async () => {
+        return action(async isCurrent => {
             const fullName = String(values.full_name || '').trim();
             if (!fullName || fullName.length > 120) throw new Error('Enter your full name (up to 120 characters).');
             const email = emailValue(values), password = passwordValue(values, true);
             const { data, error } = await client.auth.signUp({ email, password, options: { data: { full_name: fullName }, emailRedirectTo: redirectUrl() } });
+            if (!isCurrent()) return false;
             if (error) throw error;
             clearForm();
             show('signin', 'Check your inbox to verify your email, then sign in. Your church access request will be sent after verified sign-in; admin approval is a separate step.');
-            if (data.session) { locallySignedOut = false; scheduleSession(data.session, 'SIGNED_IN'); }
+            if (data.session) { locallySignedOut = false; pendingSignout(false); scheduleSession(data.session, 'SIGNED_IN'); }
         }, 'Creating your account…');
     }
     async function requestPasswordReset(values) {
-        return action(async () => {
+        return action(async isCurrent => {
             const email = emailValue(values);
             const { error } = await client.auth.resetPasswordForEmail(email, { redirectTo: redirectUrl() });
+            if (!isCurrent()) return false;
             if (error) throw error;
             clearForm();
             status('If an account exists for that email, a reset link is on its way. Check your inbox and spam folder.');
         }, 'Sending reset link…');
     }
     async function updatePassword(values) {
-        return action(async () => {
+        return action(async isCurrent => {
             if (!recovery || !user) throw new Error('Open a valid password reset link first.');
             const password = passwordValue(values, true);
             const { error } = await client.auth.updateUser({ password });
+            if (!isCurrent()) return false;
             if (error) throw error;
-            recovery = false;
-            rememberRecovery();
-            const signedOut = await logout();
+            const signedOut = await beginLogout();
             if (signedOut) show('signin', 'Your password has been updated. Sign in with your new password.');
         }, 'Saving your password…');
     }
     async function continueWithGoogle() {
-        return action(async () => {
+        return action(async isCurrent => {
             const { data, error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: redirectUrl() } });
+            if (!isCurrent()) return false;
             if (error) throw error;
             if (!data?.url) throw new Error('Google sign-in could not start. Please try again.');
             clearPasswords();
             status('Opening Google’s secure sign-in page…');
         }, 'Opening Google…');
     }
-    async function logout() {
+    function logout() {
+        return beginLogout(actionPromise);
+    }
+    function beginLogout(pendingAction = null) {
+        if (logoutPromise) return logoutPromise;
+        actionRevision++;
         locallySignedOut = true;
+        pendingSignout(true);
         recovery = false;
-        rememberRecovery();
         cancelPending();
         notifySignedOut();
         retryAction = null;
         hide();
-        try {
-            if (client) {
-                const { error } = await client.auth.signOut({ scope: 'local' });
-                if (error) throw error;
+        setBusy(true);
+        logoutPromise = (async () => {
+            try {
+                // Password sign-in can save its session outside the SDK auth lock.
+                // Finish that request first, then clear the session it may have saved.
+                if (pendingAction) await pendingAction;
+                if (client) {
+                    const { error } = await client.auth.signOut({ scope: 'local' });
+                    if (error) throw error;
+                }
+                rememberRecovery();
+                pendingSignout(false);
+                locallySignedOut = false;
+                hide();
+                return true;
+            } catch (error) {
+                show('signin');
+                status('Private church data is hidden. We couldn’t clear the saved session: ' + friendlyError(error) + ' Retry logging out before closing this browser.', 'error');
+                retryAction = logout;
+                $('auth-retry').textContent = 'Retry log out';
+                $('auth-retry').hidden = false;
+                callbacks.onError?.(error);
+                return false;
             }
-            hide();
-            return true;
-        } catch (error) {
-            show('signin');
-            status('Private church data is hidden. We couldn’t clear the saved session: ' + friendlyError(error) + ' Retry logging out before closing this browser.', 'error');
-            retryAction = logout;
-            $('auth-retry').textContent = 'Retry log out';
-            $('auth-retry').hidden = false;
-            callbacks.onError?.(error);
-            return false;
-        }
+        })().finally(() => { logoutPromise = null; setBusy(false); });
+        return logoutPromise;
     }
     function cleanCallbackUrl() {
         const url = new URL(window.location.href);
@@ -340,11 +384,16 @@
         authKeys.forEach(key => url.searchParams.delete(key));
         window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
     }
-    async function loadSupabase() {
+    async function loadSupabase(options) {
         if (window.supabase?.createClient) return;
+        const sdkUrl = options.sdkUrl || window.GatherConfig?.sdkUrl;
+        const sdkIntegrity = options.sdkIntegrity || window.GatherConfig?.sdkIntegrity;
+        if (!sdkUrl || !sdkIntegrity) throw new Error('Configure the pinned Supabase SDK URL and integrity in config.js.');
         await new Promise((resolve, reject) => {
             const script = document.createElement('script');
-            script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+            script.src = sdkUrl;
+            script.integrity = sdkIntegrity;
+            script.crossOrigin = 'anonymous';
             script.onload = resolve;
             script.onerror = () => { script.remove(); reject(new Error('Could not load Supabase. Check your connection and try again.')); };
             document.head.append(script);
@@ -357,22 +406,25 @@
             const fragment = new URLSearchParams(window.location.hash.slice(1));
             const query = new URLSearchParams(window.location.search);
             const callbackError = fragment.get('error_description') || query.get('error_description') || fragment.get('error') || query.get('error');
-            recovery = fragment.get('type') === 'recovery';
-            if (recovery) rememberRecovery('pending');
+            locallySignedOut = pendingSignout();
+            recovery = fragment.get('type') === 'recovery' || Boolean(storedRecovery());
+            if (fragment.get('type') === 'recovery') rememberRecovery('pending');
             if (recovery) show('recovery', 'Connecting securely…');
             else if (callbackError) show('signin', 'Connecting securely…');
             else if (!$('auth-screen').hidden) status('Connecting securely…');
             setBusy(true, 'Connecting…');
             try {
-                await loadSupabase();
-                client = window.supabase.createClient(options.url, options.key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'implicit' } });
+                await loadSupabase(options);
+                if (!client) client = window.supabase.createClient(options.url, options.key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'implicit' } });
                 callbacks.onReady?.(client);
-                subscription?.unsubscribe();
-                subscription = client.auth.onAuthStateChange(authEvent).data.subscription;
+                if (!subscription) subscription = client.auth.onAuthStateChange(authEvent).data.subscription;
+                const ticket = lifecycle;
                 const { data, error } = await client.auth.getSession();
                 cleanCallbackUrl();
                 ready = true;
                 setBusy(false);
+                // An auth event arriving during restoration owns the newer session.
+                if (ticket !== lifecycle && !callbackError) return client;
                 if (error) throw error;
                 if (callbackError) {
                     cancelPending();
@@ -383,6 +435,14 @@
                     callbacks.onSignedOut?.();
                     show('signin');
                     status('Sign-in could not be completed: ' + callbackError.slice(0, 240) + ' Please try again.', 'error');
+                } else if (locallySignedOut) {
+                    recovery = false;
+                    notifySignedOut();
+                    hide();
+                    status('Private church data is hidden. Retry logging out to clear the saved session.', 'error');
+                    retryAction = logout;
+                    $('auth-retry').textContent = 'Retry log out';
+                    $('auth-retry').hidden = false;
                 } else if (data.session) {
                     scheduleSession(data.session, recovery ? 'PASSWORD_RECOVERY' : 'INITIAL_SESSION');
                 } else {
@@ -401,8 +461,6 @@
                 cancelPending();
                 user = null;
                 ready = Boolean(client);
-                recovery = false;
-                rememberRecovery();
                 setBusy(false);
                 callbacks.onSignedOut?.();
                 status(friendlyError(error), 'error');

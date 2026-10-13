@@ -1,5 +1,5 @@
 # Requires installed PostgreSQL; no Supabase credentials, Docker, or live access.
-# Runs the original schema, both upgrade/first-admin preservation, rollback
+# Runs the original schema, upgrade/first-admin preservation, rollback
 # privacy/security suites and concurrent member changes in a temporary cluster.
 param(
     [string]$PostgresBin = 'C:\Program Files\PostgreSQL\18\bin',
@@ -103,7 +103,11 @@ insert into auth.users(id, email, email_confirmed_at, raw_user_meta_data) values
 ('f2000000-0000-4000-8000-000000000002', 'legacy-viewer@example.invalid', now(), '{}');
 insert into public.gather_planners(id, name, data, version) values
 ('f2100000-0000-4000-8000-000000000001', 'Legacy church',
- '{"services":[{"id":"legacy-service","title":"Existing service"}],"team":[],"songs":[]}', 23);
+ '{"services":[{"id":"legacy-service","title":"Existing service"}],"team":[],"songs":[]}', 23),
+-- The original CHECK accepted this missing array. Audit must preserve this
+-- historical row rather than rewrite it, fail installation, or publish it.
+('f2100000-0000-4000-8000-000000000002', 'Historical malformed document',
+ '{"services":[],"team":[],"legacy_private":"preserve-original-document"}', 17);
 insert into public.gather_members(church_id, user_id, role) values
 ('f2100000-0000-4000-8000-000000000001', 'f2000000-0000-4000-8000-000000000001', 'editor'),
 ('f2100000-0000-4000-8000-000000000001', 'f2000000-0000-4000-8000-000000000002', 'viewer');
@@ -188,6 +192,33 @@ end $$;
 reset role;
 '@ ('public-upgrade-preservation-' + $pass)
     }
+    foreach ($pass in @(1, 2)) {
+        Invoke-SqlFile (Join-Path $repoRoot 'migrations\20261013_audit_hardening.sql')
+        Invoke-Sql @'
+do $$ begin
+  if exists ((select * from public.gather_members except select * from public.gather_test_members_baseline)
+    union all (select * from public.gather_test_members_baseline except select * from public.gather_members)) then
+    raise exception 'Audit migration changed an existing membership';
+  end if;
+  if exists ((select * from public.gather_planners except select * from public.gather_test_baseline)
+    union all (select * from public.gather_test_baseline except select * from public.gather_planners)) then
+    raise exception 'Audit migration changed legacy planner JSON/version';
+  end if;
+  if (select policies from public.gather_test_access_baseline) is distinct from
+     (select coalesce(jsonb_agg(to_jsonb(p) order by p.tablename, p.policyname), '[]'::jsonb)
+      from pg_catalog.pg_policies p where p.schemaname='public'
+        and p.tablename in ('gather_members','gather_planners')) then
+    raise exception 'Audit migration changed authenticated church policies';
+  end if;
+  if not exists (select 1 from pg_catalog.pg_constraint
+    where conrelid='public.gather_planners'::regclass and conname='gather_planner_document_shape' and not convalidated) then
+    raise exception 'Strict document shape constraint is absent or unexpectedly validated';
+  end if;
+  raise notice 'PASS: audit migration/rerun preserves planner JSON/versions, historical malformed rows, memberships and private policies';
+end $$;
+'@ ('audit-upgrade-preservation-' + $pass)
+    }
+    Invoke-SqlFile (Join-Path $PSScriptRoot 'verify-live-readonly.sql')
     Invoke-SqlFile (Join-Path $PSScriptRoot 'security-tests.sql')
     Invoke-SqlFile (Join-Path $PSScriptRoot 'public-security-tests.sql')
 
@@ -241,6 +272,46 @@ commit;
         Wait-SqlJob $jobA $nameA $true
         Wait-SqlJob $jobB $nameB $false 'last approved admin|could not serialize access'
         Invoke-Sql "update public.gather_members set status='approved',role='admin' where church_id='f3100000-0000-4000-8000-000000000001';" ('restore-' + $isolation.Replace(' ', '-'))
+    }
+    Invoke-Sql @'
+insert into auth.users(id,email,email_confirmed_at) values
+('f3000000-0000-4000-8000-000000000003','race-editor@example.invalid',now());
+insert into public.gather_members(church_id,user_id,role,status) values
+('f3100000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000003','editor','approved');
+'@ 'editor-race-fixture'
+    foreach ($case in @(
+        @{ Isolation = 'read committed'; Change = "status='revoked'"; Name = 'editor-revoked-read-committed' },
+        @{ Isolation = 'repeatable read'; Change = "status='revoked'"; Name = 'editor-revoked-repeatable-read' },
+        @{ Isolation = 'read committed'; Change = "role='viewer'"; Name = 'editor-demoted-read-committed' }
+    )) {
+        Invoke-Sql "update public.gather_members set status='approved',role='editor' where user_id='f3000000-0000-4000-8000-000000000003';" ('restore-' + $case.Name)
+        $changingMember = "begin; update public.gather_members set " + $case.Change + " where user_id='f3000000-0000-4000-8000-000000000003'; select pg_sleep(2); commit;"
+        $waitingWrite = @'
+set application_name='gather-race-editor';
+begin isolation level REPLACE_ISOLATION;
+set local role authenticated;
+select set_config('request.jwt.claim.sub','f3000000-0000-4000-8000-000000000003',true);
+update public.gather_planners set data=jsonb_set(data,'{unauthorized_race_write}','true'::jsonb),version=version+1
+where id='f3100000-0000-4000-8000-000000000001' and version=0;
+commit;
+'@
+        $waitingWrite = $waitingWrite.Replace('REPLACE_ISOLATION', $case.Isolation)
+        $jobA = Start-SqlJob $changingMember ($case.Name + '-member-change')
+        Start-Sleep -Milliseconds 500
+        $jobB = Start-SqlJob $waitingWrite ($case.Name + '-waiting-write')
+        Wait-SqlBlock 'gather-race-editor'
+        Wait-SqlJob $jobA ($case.Name + '-member-change') $true
+        Wait-SqlJob $jobB ($case.Name + '-waiting-write') $false 'approved church editor is required|editing access changed|could not serialize access'
+        Invoke-Sql @'
+do $$ begin
+  if not exists (select 1 from public.gather_planners
+    where id='f3100000-0000-4000-8000-000000000001' and version=0
+      and not (data ? 'unauthorized_race_write')) then
+    raise exception 'Unauthorized concurrent save changed planner data or version';
+  end if;
+  raise notice 'PASS: concurrent access removal leaves planner JSON/version unchanged';
+end $$;
+'@ ($case.Name + '-preservation')
     }
     Write-Output 'PASS: local PostgreSQL migrations, bootstrap, public privacy, RLS/RPC, and concurrency checks complete.'
 }

@@ -8,13 +8,13 @@ Gather remains a static HTML/CSS/JavaScript app backed by Supabase. Visitors can
 
 1. Export a private backup from your existing Gather app and retain a database backup/snapshot if available.
 2. Open your existing Supabase project → SQL Editor → New query.
-3. **If the previous approval/Admin upgrade is already installed**, run only the complete [public-view migration](migrations/20261013_public_view.sql).
-4. **If your database still uses the original `setup.sql` schema**, run the [member-approval migration](migrations/20261013_member_approval.sql) first, then the [public-view migration](migrations/20261013_public_view.sql). The public migration requires the approval upgrade and aborts if it is missing.
+3. **If approval and public viewing are already installed**, run only the complete [audit-hardening migration](migrations/20261013_audit_hardening.sql).
+4. **If your database still uses the original `setup.sql` schema**, run the [member-approval migration](migrations/20261013_member_approval.sql), then the [public-view migration](migrations/20261013_public_view.sql), then [audit hardening](migrations/20261013_audit_hardening.sql). If approval is installed but public viewing is not, start with public viewing. Each upgrade checks its prerequisites.
 5. Confirm each transaction succeeds. A failure rolls back that migration; retain the error and fix its cause. Keep RLS enabled.
 
-**Do not rerun `setup.sql` on an existing installation.** It creates original tables and a new church. Only a completely new project needs `setup.sql` first, member approval second, and public viewing third.
+**Do not rerun `setup.sql` on an existing installation.** It creates original tables and a new church. Only a completely new project needs `setup.sql` first, member approval second, public viewing third, and audit hardening fourth. Bootstrap a first admin afterward only if needed.
 
-Both upgrades preserve planner JSON, church IDs, and planner versions. The approval upgrade retains existing editor/viewer roles and approves their legacy memberships; new requests default to pending/viewer. Legacy request dates reflect the upgrade because the previous schema did not record them. Rerunning either migration preserves existing statuses, review timestamps, and planner records. The public migration never marks old records public.
+The upgrades preserve planner JSON, church IDs, and planner versions. The approval upgrade retains existing editor/viewer roles and approves their legacy memberships; new requests default to pending/viewer. Legacy request dates reflect the upgrade because the previous schema did not record them. The public migration never marks old records public. Audit hardening rechecks editor permissions during writes against concurrent revocation/demotion, makes the public projection ignore invalid calendar dates and duplicate IDs, and enforces the three root arrays on future writes. Its `NOT VALID` constraint leaves malformed historical rows intact; if the app refuses to load them, retain an owner-only database backup and prepare a reviewed correction before editing. Rerunning the upgrades preserves statuses, review timestamps, and planner records.
 
 Authenticated users can read only their own membership. Church admins use restricted RPCs to list/review their church members. Private planner RLS permits reads only for approved, email-verified members and writes only for approved admins/editors. Profile metadata supplies display names only; church memberships determine roles. Signing in alone never grants editing permission.
 
@@ -45,13 +45,15 @@ No registrant automatically becomes an admin. Manage subsequent approvals/roles 
 
 ## 3. Public app configuration
 
-Your existing `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and `CHURCH_ID` at the top of [app.js](app.js) were preserved. Keep them unless intentionally connecting to a separate test project. A new installation needs the Project URL, publishable key, and church UUID.
+Your existing project URL, public publishable key, and church UUID were preserved in [config.js](config.js), under `url`, `key`, and `churchId`. Keep them unless intentionally connecting to a separate test project. A new installation needs the Project URL, publishable key, and church UUID.
 
 These are public browser values. Never put a `service_role` key, Supabase secret key, Google Client Secret, or SMTP password in browser code or GitHub. Google/SMTP secrets belong in Supabase dashboard settings.
 
 Public visitors use the publishable key and the database `anon` role without creating an Auth account. **Do not enable Supabase Anonymous Sign-Ins for this feature.** Keep your existing email, Google, SMTP, Site URL, and redirect settings. The SQL migration installs the public RPC permissions; there is no public table policy to add manually.
 
 This app has no build step. Plain browser JavaScript cannot automatically read Vercel environment variables; setting them alone will not configure Gather.
+
+The Supabase browser SDK is pinned to **2.117.3** with a SHA-384 integrity hash and `crossorigin="anonymous"`. The hash was computed from the exact CDN file; a changed file fails to load. If updating it, review the official package/advisories, recompute integrity for the exact URL, and update `sdkUrl`, `sdkIntegrity`, and `script-src` in [vercel.json](vercel.json) together. If changing Supabase projects, also change the exact HTTPS/WSS origins in that file's `connect-src`. The local server reads the same policy. Google Fonts remains an external stylesheet/font dependency with system-font fallbacks.
 
 ## 4. Supabase email and redirect settings
 
@@ -91,12 +93,13 @@ Install Node.js 22 or newer. In a terminal at this repository:
 ```powershell
 npm.cmd run check
 npm.cmd test
+npm.cmd run audit:secrets
 npm.cmd run dev
 ```
 
 No npm dependencies need installing. On macOS/Linux use `npm` instead of `npm.cmd`. Open **http://localhost:3000/** and use Ctrl+C to stop. Actual authentication needs internet access for the SDK and Supabase. Do not open the app with `file://`.
 
-Browser sign-in connects to the project configured in `app.js`. Use a separate test Supabase project for experiments that should not affect your church. Automated tests never connect to those live configuration values.
+Browser sign-in connects to the project configured in `config.js`. Use a separate test Supabase project for experiments that should not affect your church. Automated tests never connect to those live configuration values. The secret audit reads tracked/nonignored files, reachable Git blobs, and commit messages and reports only redacted locations/classifications/counts. Synthetic fixture matches are summarized by default; use `npm.cmd run audit:secrets -- --include-fixtures` for all redacted locations. A clean pattern scan is not proof that every possible credential or private record is absent.
 
 | Access | Planner | Private backups | Member administration |
 | --- | --- | --- | --- |
@@ -107,14 +110,14 @@ Browser sign-in connects to the project configured in `app.js`. Use a separate t
 
 Pending/rejected/revoked users see a nonblocking approval notice with Check status while continuing to browse public content. Approval defaults to Viewer unless an admin explicitly chooses another role. Admin controls include search, status filters/counts, confirmations, and reviewer/date details. Logout clears private data, open editing forms, and admin handlers, then returns to public browsing.
 
-Refresh data/Check status rechecks access. Focus, visibility changes, and a one-minute check also detect access changes while active. Database policies block future private access immediately; the interface updates when rechecked. Public loading/fetch errors have visible feedback and a retry action. Shared planner edits load with Refresh data; there is no realtime push. Stale versions cannot overwrite newer saves. A failed save reloads server data and explains the unsaved edit; re-enter it after refreshing. Import replaces the shared planner, including its publication choices, so coordinate imports.
+Refresh data/Check status rechecks access. Focus, visibility changes, and a one-minute check also detect access changes while active. Database policies block future private access immediately; the interface updates when rechecked. Public loading/fetch errors have visible feedback and a retry action. Shared planner edits load with Refresh data; there is no realtime push. Stale versions cannot overwrite newer saves. A rejected save reports **Not saved**; an ambiguous network/response failure reports **Save not confirmed**. Gather reloads server data before further editing, so check it before retrying. Invalid form drafts stay open for correction. Backup imports require valid JSON/model data, safe property names and a file no larger than 10 MiB. Import replaces the shared planner, including its publication choices, so coordinate imports.
 
 ## 7. Verification: local results and live checklist
 
 Locally passed:
 
-- JavaScript syntax checks and **70 behavioral Node tests** with mocked Auth/RPC responses and a small DOM harness: logged-out public loading/navigation/errors, allowlisted response validation, hidden/guarded private tools, optional sign-in/registration/Google/recovery, pending/rejected public browsing, explicit publication/assignment choices, approved-role permissions, preserved admin actions and planner features, stale saves, logout clearing private state, and late async responses.
-- PostgreSQL 18 in a new isolated local cluster: **110 security assertions** (65 existing approval checks plus 45 public-interface checks), original-schema upgrade preserving legacy JSON/versions/membership roles, explicit bootstrap, unchanged migration reruns, and actual concurrent admin/direct-owner changes. Public checks execute anonymous/pending/viewer/editor/admin roles, verify exact projection contents and omission of private fields, deny anonymous writes/private reads and pending edits, allow editor writes, and preserve church/last-admin protection. Three concurrency cases cover admin RPC revocation and owner demotions under Read Committed/Repeatable Read.
+- JavaScript syntax checks and **105 Node tests**, with mocked Auth/RPC responses and a small DOM harness plus actual local-server HTTP checks: public/role boundaries, email/Google/recovery and session races, account-bound private reads, existing planner/admin features, stale or ambiguous saves, invalid draft/calendar/import validation, coalesced refreshes, future-service selection, admin cleanup/role drafts, credential redaction, CSP/config consistency, and static route restrictions. See [AUDIT.md](AUDIT.md) for evidence and scope.
+- PostgreSQL 18 in a new isolated local cluster: **130 security assertions** (81 core permission/member checks plus 49 public-interface checks), nine migration/bootstrap preservation checks, and six two-connection concurrency scenarios. Public checks execute anonymous/pending/viewer/editor/admin roles, verify exact projection contents and omission of private fields, deny anonymous writes/private reads and pending edits, allow editor writes, and preserve church/last-admin protection. Concurrency cases cover admin RPC revocation, owner demotions, and editor saves racing revocation/demotion under Read Committed/Repeatable Read. Rejected writes leave planner JSON and versions unchanged.
 
 Mocked client denials alone do not prove RLS. The local PostgreSQL checks execute actual RLS/RPCs, using a minimal `auth.users`/`auth.uid()` fixture and synthetic JWT claims. They do not exercise hosted Auth/PostgREST.
 
@@ -126,7 +129,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File sql/test-local.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File sql/test-local.ps1 -PostgresBin "C:\path\to\PostgreSQL\bin"
 ```
 
-The runner creates/removes a temporary local cluster and uses [sql/security-tests.sql](sql/security-tests.sql) and [sql/public-security-tests.sql](sql/public-security-tests.sql). It checks both upgrade migrations and never connects to your live project.
+The runner creates/removes a temporary local cluster and uses [sql/security-tests.sql](sql/security-tests.sql) and [sql/public-security-tests.sql](sql/public-security-tests.sql). It checks all three upgrade migrations and never connects to your live project.
 
 **Rendered browser appearance, responsive layout, and screenshots remain unverified.** Client behavior was checked with the Node DOM harness. Check the finished app in your desktop and mobile browser during the manual checklist below.
 
@@ -145,8 +148,12 @@ After setup, run these remaining **live** checks with test accounts:
 ## 8. GitHub/Vercel deployment
 
 1. Run the checks, review changes, then commit/push to your GitHub repository.
-2. Import/retain the repository's Vercel Git integration. Choose Framework Preset **Other**, repository root, an empty/disabled Build Command override, and Output Directory **`.`**. No Install Command is needed because there are no dependencies. See [Vercel build configuration](https://vercel.com/docs/builds/configure-a-build).
+2. Import/retain the repository's Vercel Git integration. Keep repository root and Framework Preset **Other**. [vercel.json](vercel.json) specifies empty build/install commands and Output Directory **`.`**, allows only the public app files, and adds security headers. [.vercelignore](.vercelignore) also restricts uploads. Retain both files; a generic static host serving the whole repository root does not apply this protection. See [Vercel configuration](https://vercel.com/docs/project-configuration/vercel-json) and [deployment exclusions](https://vercel.com/docs/deployments/vercel-ignore).
 3. Deploy through Vercel. Set the actual production URL in Supabase Site URL/Redirect URLs and Google's origins.
 4. Perform the live checklist before inviting your church.
 
-Public source assets are `index.html`, `style.css`, `auth.js`, `access.js`, `admin.js`, and `app.js`. Keep credentials out of every repository file. Local test artifacts under `.local-qa` should not be committed.
+Public source assets are `index.html`, `style.css`, `config.js`, `planner.js`, `render.js`, `auth.js`, `access.js`, `admin.js`, and `app.js`. Keep privileged credentials and private backups out of every repository file. Local test artifacts under `.local-qa` should not be committed. `.gitignore` excludes new environment files and private backups; it does not erase files already committed in Git history.
+
+After deploying when you choose to, check response headers and confirm `/README.md`, `/setup.sql`, `/.env`, `/sql/first-admin.sql`, and `/tests/app.test.mjs` return 404. Check the browser console for CSP/SRI errors, public loading, and all login methods. The deployment configuration and headers were tested locally; hosted Vercel behavior remains unverified.
+
+For owner-only, read-only hosted database inspection, run [sql/verify-live-readonly.sql](sql/verify-live-readonly.sql) and compare its schema/grant/function results with the expected migrations. It outputs metadata and aggregate legacy-data health counts, with no private planner/member rows, routine bodies or setting values, and makes no changes. Quoted literals in policy/constraint definitions are redacted; custom object and argument names remain visible, so keep the output with the project owner. Any additional live functions/policies need review before claiming that hosted access matches the repository. If health counts identify malformed legacy data, retain an owner-only backup and review a correction before editing. Read [AUDIT.md](AUDIT.md) for findings, removals, verification limits, and remaining actions.

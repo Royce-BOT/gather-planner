@@ -12,9 +12,10 @@ const sessionFor = user => ({ user });
 const flush = () => new Promise(resolve => setTimeout(resolve, 10));
 const plain = value => JSON.parse(JSON.stringify(value));
 
-async function fixture({ session = null, currentUser = verifiedUser, href = 'http://localhost:3000/', failure = {}, deferred = {}, storedRecovery = '' } = {}) {
+async function fixture({ session = null, currentUser = verifiedUser, href = 'http://localhost:3000/', failure = {}, deferred = {}, storedRecovery = '', storedSignout = false, configureAuth } = {}) {
   const calls = [], elements = new Map(), store = new Map();
   if (storedRecovery) store.set('gather-password-recovery', storedRecovery);
+  if (storedSignout) store.set('gather-signout-pending', 'true');
   for (const id of ids) {
     const handlers = new Map(), attrs = new Map();
     elements.set(id, {
@@ -33,15 +34,19 @@ async function fixture({ session = null, currentUser = verifiedUser, href = 'htt
   const classes = new Set();
   let listener;
   const auth = {
-    onAuthStateChange(callback) { listener = callback; return { data: { subscription: { unsubscribe() {} } } }; },
+    onAuthStateChange(callback) { calls.push(['subscribe']); listener = callback; return { data: { subscription: { unsubscribe() {} } } }; },
     async getSession() { calls.push(['getSession']); return { data: { session }, error: failure.getSession || null }; },
     async getUser() { calls.push(['getUser']); return deferred.getUser ? await deferred.getUser : { data: { user: currentUser }, error: failure.getUser || null }; },
-    async signInWithPassword(values) { calls.push(['signInWithPassword', plain(values)]); return { data: { session: sessionFor(currentUser) }, error: failure.signIn || null }; },
+    async signInWithPassword(values) {
+      calls.push(['signInWithPassword', plain(values)]);
+      if (!failure.signIn) { session = sessionFor(currentUser); listener?.('SIGNED_IN', session); }
+      return { data: { session }, error: failure.signIn || null };
+    },
     async signUp(values) { calls.push(['signUp', plain(values)]); return deferred.signUp ? await deferred.signUp : { data: { user: currentUser, session: null }, error: failure.signUp || null }; },
     async resetPasswordForEmail(email, options) { calls.push(['resetPasswordForEmail', email, plain(options)]); return { error: failure.reset || null }; },
-    async updateUser(values) { calls.push(['updateUser', plain(values)]); return { data: { user: currentUser }, error: failure.updateUser || null }; },
+    async updateUser(values) { calls.push(['updateUser', plain(values)]); if (!failure.updateUser) listener?.('USER_UPDATED', session); return { data: { user: currentUser }, error: failure.updateUser || null }; },
     async signInWithOAuth(values) { calls.push(['signInWithOAuth', plain(values)]); return { data: { url: 'https://google.example.test/oauth' }, error: failure.google || null }; },
-    async signOut(values) { calls.push(['signOut', plain(values)]); if (!failure.signOut) listener?.('SIGNED_OUT', null); return { error: failure.signOut || null }; }
+    async signOut(values) { calls.push(['signOut', plain(values)]); if (!failure.signOut) { session = null; listener?.('SIGNED_OUT', null); } return { error: failure.signOut || null }; }
   };
   const location = new URL(href);
   const window = {
@@ -62,6 +67,12 @@ async function fixture({ session = null, currentUser = verifiedUser, href = 'htt
   const context = vm.createContext({ window, document, URL, URLSearchParams, setTimeout, clearTimeout });
   vm.runInContext(source, context);
   const api = window.GatherAuth;
+  const emit = (event, nextSession) => {
+    session = nextSession;
+    if (nextSession?.user) currentUser = nextSession.user;
+    listener(event, nextSession);
+  };
+  configureAuth?.(auth, emit);
   await api.start({
     url: 'https://test.supabase.co', key: 'public-test-key',
     onReady() { calls.push(['ready']); },
@@ -70,7 +81,7 @@ async function fixture({ session = null, currentUser = verifiedUser, href = 'htt
     onError(error) { calls.push(['error', error.message]); }
   });
   await flush();
-  return { api, calls, elements, window, store, auth, classes, emit: (event, nextSession) => listener(event, nextSession), flush };
+  return { api, calls, elements, window, store, auth, classes, emit, flush };
 }
 
 test('signed-out startup leaves the public workspace visible and login and registration can be dismissed', async () => {
@@ -113,6 +124,8 @@ test('public retry can recover a failed startup while keeping authentication opt
   assert.equal(f.elements.get('auth-screen').hidden, true);
   assert.equal(f.elements.get('workspace-main').inert, false);
   assert.equal(f.calls.filter(call => call[0] === 'getSession').length, 2);
+  assert.equal(f.calls.filter(call => call[0] === 'createClient').length, 1);
+  assert.equal(f.calls.filter(call => call[0] === 'subscribe').length, 1);
   assert.equal(f.calls.some(call => call[0] === 'session'), false);
 });
 
@@ -345,4 +358,125 @@ test('a session belonging to a different verified user is rejected', async () =>
   assert.equal(f.calls.some(call => call[0] === 'session'), false);
   assert.equal(f.api.currentUser, null);
   assert.match(f.elements.get('auth-status').textContent, /session changed/);
+});
+
+test('cross-tab logout permits a later verified cross-tab login', async () => {
+  const f = await fixture({ session: sessionFor(verifiedUser) });
+  f.emit('SIGNED_OUT', null);
+  assert.equal(f.api.currentUser, null);
+  const other = { ...verifiedUser, id: 'member-b' };
+  f.emit('SIGNED_IN', sessionFor(other));
+  await flush();
+  assert.equal(f.api.currentUser.id, other.id);
+  assert.equal(f.calls.filter(call => call[0] === 'session').at(-1)[1], other.id);
+});
+
+test('repeated logout shares one request and blocks sign-in until that request finishes', async () => {
+  const f = await fixture({ session: sessionFor(verifiedUser) });
+  let finishLogout;
+  f.auth.signOut = async () => {
+    f.calls.push(['delayedSignOut']);
+    return new Promise(resolve => { finishLogout = resolve; });
+  };
+  const first = f.api.logout();
+  const second = f.api.logout();
+  assert.equal(first, second);
+  assert.equal(f.api.currentUser, null);
+  assert.equal(await f.api.signIn({ email: 'member@example.test', password: 'strong-pass' }), false);
+  assert.equal(f.calls.some(call => call[0] === 'signInWithPassword'), false);
+  f.emit('SIGNED_OUT', null);
+  finishLogout({ error: null });
+  assert.equal(await first, true);
+  assert.equal(f.calls.filter(call => call[0] === 'delayedSignOut').length, 1);
+  assert.equal(await f.api.signIn({ email: 'member@example.test', password: 'strong-pass' }), true);
+  await flush();
+  assert.equal(f.api.currentUser.id, verifiedUser.id);
+});
+
+test('a late failed session recheck cannot clear a newer account', async () => {
+  const f = await fixture({ session: sessionFor(verifiedUser) });
+  let finishCheck;
+  f.auth.getSession = () => new Promise(resolve => { finishCheck = resolve; });
+  const oldCheck = f.api.checkSession();
+  const other = { ...verifiedUser, id: 'member-b' };
+  f.emit('SIGNED_IN', sessionFor(other));
+  await flush();
+  const signoutCount = f.calls.filter(call => call[0] === 'signedOut').length;
+  finishCheck({ data: { session: null }, error: { message: 'Network connection failed' } });
+  assert.equal(await oldCheck, false);
+  assert.equal(f.api.currentUser.id, other.id);
+  assert.equal(f.calls.filter(call => call[0] === 'signedOut').length, signoutCount);
+});
+
+test('a newer auth event takes precedence over a stale signed-out startup snapshot', async () => {
+  const f = await fixture({ configureAuth(auth, emit) {
+    auth.getSession = async () => {
+      emit('SIGNED_IN', sessionFor(verifiedUser));
+      return { data: { session: null }, error: null };
+    };
+  } });
+  assert.equal(f.api.currentUser.id, verifiedUser.id);
+  assert.equal(f.calls.filter(call => call[0] === 'session').length, 1);
+});
+
+test('recovery verification failures and retries keep the saved recovery session out of private access', async () => {
+  const failure = { getUser: { message: 'Network connection failed' } };
+  const f = await fixture({ session: sessionFor(verifiedUser), storedRecovery: verifiedUser.id, failure });
+  assert.equal(f.calls.some(call => call[0] === 'session'), false);
+  assert.equal(f.store.get('gather-password-recovery'), verifiedUser.id);
+  assert.match(f.elements.get('auth-status').textContent, /Retry or cancel recovery/);
+  delete failure.getUser;
+  await f.api.checkSession();
+  assert.equal(f.elements.get('auth-submit').textContent, 'Save new password');
+  assert.equal(f.calls.some(call => call[0] === 'session'), false);
+  assert.equal(f.store.get('gather-password-recovery'), verifiedUser.id);
+});
+
+test('failed recovery cancellation remains suppressed after refresh until explicit logout succeeds', async () => {
+  const failure = { signOut: { message: 'Network connection failed' } };
+  const f = await fixture({ session: sessionFor(verifiedUser), storedRecovery: verifiedUser.id, failure });
+  assert.equal(await f.api.dismiss(), false);
+  assert.equal(f.store.get('gather-password-recovery'), verifiedUser.id);
+  assert.equal(f.store.get('gather-signout-pending'), 'true');
+  const refreshed = await fixture({ session: sessionFor(verifiedUser), storedRecovery: verifiedUser.id, storedSignout: true });
+  assert.equal(refreshed.api.currentUser, null);
+  assert.equal(refreshed.calls.some(call => call[0] === 'session'), false);
+  assert.equal(refreshed.elements.get('auth-screen').hidden, true);
+  assert.equal(await refreshed.api.logout(), true);
+  assert.equal(refreshed.store.has('gather-password-recovery'), false);
+  assert.equal(refreshed.store.has('gather-signout-pending'), false);
+});
+
+test('failed logout followed by explicit sign-in cannot restore its old logout error on retry', async () => {
+  const failure = { signOut: { message: 'Network connection failed' } };
+  const f = await fixture({ session: sessionFor(verifiedUser), failure });
+  assert.equal(await f.api.logout(), false);
+  assert.equal(await f.api.signIn({ email: 'member@example.test', password: 'strong-pass' }), true);
+  await flush();
+  assert.equal(f.api.currentUser.id, verifiedUser.id);
+  assert.equal(f.store.has('gather-signout-pending'), false);
+  assert.equal(f.elements.get('auth-retry').hidden, true);
+});
+
+test('logout during an unfinished password login suppresses its late event and clears its saved session', async () => {
+  const f = await fixture();
+  let finishSignin;
+  f.auth.signInWithPassword = async () => {
+    await new Promise(resolve => { finishSignin = resolve; });
+    f.emit('SIGNED_IN', sessionFor(verifiedUser));
+    return { data: { session: sessionFor(verifiedUser) }, error: null };
+  };
+  const signin = f.api.signIn({ email: 'member@example.test', password: 'strong-pass' });
+  const logout = f.api.logout();
+  assert.equal(f.calls.some(call => call[0] === 'signOut'), false);
+  finishSignin();
+  assert.equal(await signin, false);
+  assert.equal(await logout, true);
+  await flush();
+  assert.equal(f.api.currentUser, null);
+  assert.equal(f.calls.some(call => call[0] === 'session'), false);
+  assert.equal(f.calls.filter(call => call[0] === 'signOut').length, 1);
+  assert.equal(f.elements.get('auth-screen').hidden, true);
+  await f.api.checkSession();
+  assert.equal(f.api.currentUser, null);
 });

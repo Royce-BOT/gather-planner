@@ -16,7 +16,7 @@ const publicData = () => ({
   songs: [{ id: 'public-song', title: 'Public Song' }]
 });
 
-async function fixture({ status = 'approved', role = 'editor', deferredRead = null, deferredWrite = null, deferredPublic = null, publicError = null, projection = publicData(), conflict = false } = {}) {
+async function fixture({ status = 'approved', role = 'editor', deferredRead = null, deferredWrite = null, deferredPublic = null, publicError = null, projection = publicData(), conflict = false, writeError = null } = {}) {
   const calls = [], elements = new Map(), handlers = new Map();
   function element(selector) {
     if (!elements.has(selector)) elements.set(selector, {
@@ -28,14 +28,19 @@ async function fixture({ status = 'approved', role = 'editor', deferredRead = nu
     return elements.get(selector);
   }
   let callbacks, currentStatus = status, currentRole = role, saved = plannerData(), version = 4;
-  let authUser = verifiedUser, nextUserResponse = null;
+  let authUser = verifiedUser, nextUserResponse = null, nextReadResponse = null, nextPublicResponse = null;
   const query = {
     select() { return this; }, eq(column, value) { calls.push(['eq', column, value]); return this; },
     update(value) { this.payload = value; calls.push(['write', structuredClone(value)]); return this; },
-    async single() { calls.push(['read']); return deferredRead ? await deferredRead : { data: { data: structuredClone(saved), version }, error: null }; },
+    async single() {
+      calls.push(['read']);
+      if (nextReadResponse) { const response = nextReadResponse; nextReadResponse = null; return await response; }
+      return deferredRead ? await deferredRead : { data: { data: structuredClone(saved), version }, error: null };
+    },
     async maybeSingle() {
       if (deferredWrite) return await deferredWrite;
       if (conflict) return { data: null, error: null };
+      if (writeError) return { data: null, error: writeError };
       saved = structuredClone(this.payload.data); version = this.payload.version;
       return { data: { version }, error: null };
     }
@@ -45,6 +50,7 @@ async function fixture({ status = 'approved', role = 'editor', deferredRead = nu
     async rpc(name, args) {
       if (name === 'gather_public_planner') {
         calls.push(['public-read', args.p_church_id]);
+        if (nextPublicResponse) { const response = nextPublicResponse; nextPublicResponse = null; return await response; }
         return deferredPublic ? await deferredPublic : { data: structuredClone(projection), error: publicError };
       }
       calls.push(['request']);
@@ -74,6 +80,11 @@ async function fixture({ status = 'approved', role = 'editor', deferredRead = nu
     URL: { createObjectURL() { calls.push(['blob']); return 'blob:backup'; }, revokeObjectURL() {} },
     FormData: class { constructor(form) { return Object.entries(form.values); } }
   });
+  vm.runInContext(read('config.js'), context);
+  vm.runInContext(read('planner.js'), context);
+  context.GatherPlanner = context.window.GatherPlanner;
+  vm.runInContext(read('render.js'), context);
+  context.GatherView = context.window.GatherView;
   vm.runInContext(read('access.js'), context);
   context.GatherAccess = context.window.GatherAccess;
   vm.runInContext(read('app.js'), context);
@@ -85,6 +96,8 @@ async function fixture({ status = 'approved', role = 'editor', deferredRead = nu
     setMembership(status, role = currentRole) { currentStatus = status; currentRole = role; },
     setAuthUser(user) { authUser = user; },
     deferNextUser(response) { nextUserResponse = response; },
+    deferNextRead(response) { nextReadResponse = response; },
+    deferNextPublic(response) { nextPublicResponse = response; },
     run(expression) { return vm.runInContext(expression, context); },
     state() { return JSON.parse(vm.runInContext('JSON.stringify({cloudReady, publicReady, publicDb, canEdit, db, confirmed, member, view, selected, cloudVersion, saving})', context)); },
     async click(dataset) { handlers.get('click')({ target: { closest: () => ({ dataset, disabled: false }) } }); await flush(); }
@@ -440,4 +453,75 @@ test('private backups retain legacy records while publication and assignment fla
     valid.services[0].program[0].public_assignment = bool; valid.services[0].public_location = 'Public entrance';
     f.run('validatePlanner(' + JSON.stringify(valid) + ')');
   }
+});
+
+test('an invalid calendar draft remains open and never changes the saved planner', async () => {
+  const f = await fixture(); await f.signIn();
+  f.run('modal("services", "service-1")');
+  await f.element('#form').onsubmit({ preventDefault() {}, target: { values: { title: 'Invalid date draft', date: '2026-02-30', time: '09:00' } } });
+  assert.equal(f.element('#modal').open, true);
+  assert.equal(f.state().db.services[0].title, 'Existing Service');
+  assert.equal(f.calls.some(call => call[0] === 'write'), false);
+  assert.match(f.element('#toast').textContent, /valid calendar date/);
+});
+
+test('offline writes restore confirmed records and never announce success', async () => {
+  const f = await fixture({ writeError: new Error('Network unavailable') }); await f.signIn();
+  f.run('db.services[0].title = "Offline draft"');
+  assert.equal(await f.run('save()'), false);
+  assert.equal(f.state().db.services[0].title, 'Existing Service');
+  assert.equal(f.state().cloudVersion, 4);
+  assert.equal(f.state().saving, false);
+  assert.match(f.element('#toast').textContent, /Save not confirmed.*Network unavailable/);
+  assert.doesNotMatch(f.element('#toast').textContent, /Saved to Supabase/);
+});
+
+test('repeated private refreshes share a read and preserve the current private program', async () => {
+  const f = await fixture(); await f.signIn(); await f.click({ open: 'service-1' });
+  let resolve;
+  f.deferNextRead(new Promise(done => { resolve = done; }));
+  const reads = f.calls.filter(call => call[0] === 'read').length;
+  const first = f.run('refreshCloud()'); await flush();
+  const second = f.run('refreshCloud()'); await flush();
+  assert.equal(f.calls.filter(call => call[0] === 'read').length, reads + 1);
+  resolve({ data: { data: plannerData(), version: 4 }, error: null });
+  await Promise.all([first, second]);
+  assert.equal(f.state().view, 'program');
+  assert.equal(f.state().selected, 'service-1');
+});
+
+test('repeated public refreshes share a request without requiring authentication', async () => {
+  const f = await fixture(); let resolve;
+  f.deferNextPublic(new Promise(done => { resolve = done; }));
+  const reads = f.calls.filter(call => call[0] === 'public-read').length;
+  const first = f.run('refreshPublic()'), second = f.run('refreshPublic()');
+  await flush();
+  assert.equal(f.calls.filter(call => call[0] === 'public-read').length, reads + 1);
+  resolve({ data: publicData(), error: null });
+  await Promise.all([first, second]);
+  assert.equal(f.state().cloudReady, false);
+  assert.equal(f.state().publicReady, true);
+});
+
+test('unsafe and oversized backups fail before confirmation or any database write', async () => {
+  const f = await fixture(); await f.signIn();
+  const unsafe = JSON.parse(JSON.stringify(plannerData()));
+  unsafe.services[0].program[0] = JSON.parse('{"title":"Reading","minutes":5,"person":"Reader","__proto__":{"polluted":true}}');
+  await f.element('#import').onchange({ target: { files: [{ text: async () => JSON.stringify(unsafe) }], value: 'unsafe.json' } });
+  assert.match(f.element('#toast').textContent, /unsafe property/);
+  await f.element('#import').onchange({ target: { files: [{ size: 11 * 1024 * 1024, text() { assert.fail('Oversized backup must not be read'); } }], value: 'large.json' } });
+  assert.match(f.element('#toast').textContent, /10 MiB/);
+  assert.equal(f.calls.some(call => call[0] === 'write'), false);
+  assert.equal(f.calls.some(call => call[0] === 'confirm'), false);
+});
+
+test('private loading re-verifies a changed identity without fetching its protected data', async () => {
+  const f = await fixture(); await f.signIn();
+  const reads = f.calls.filter(call => call[0] === 'read').length;
+  f.setAuthUser({ ...verifiedUser, id: 'different-account' });
+  await f.run('refreshCloud()');
+  assert.equal(f.state().cloudReady, false);
+  assert.equal(f.state().db.services.length, 0);
+  assert.equal(f.calls.filter(call => call[0] === 'read').length, reads);
+  assert.ok(f.calls.some(call => call[0] === 'session-recheck'));
 });
