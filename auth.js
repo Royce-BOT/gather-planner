@@ -87,6 +87,7 @@
         $('auth-back').textContent = mode === 'recovery' ? 'Cancel and sign out' : 'Back to sign in';
         $('close-auth').textContent = mode === 'recovery' ? 'Cancel recovery and view public schedules' : 'Back to public schedules';
         $('auth-access-note').hidden = !accountMode;
+        $('auth-creator-credit').hidden = mode !== 'signin';
         $('auth-name').required = mode === 'register';
         $('auth-email').required = mode !== 'recovery';
         $('auth-password').required = mode !== 'reset';

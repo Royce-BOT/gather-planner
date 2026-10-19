@@ -7,12 +7,52 @@
     const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
     const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
+    function daysInMonth(year, month) {
+        const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+        return [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+    }
+
     function validDate(value) {
         if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
         const [year, month, day] = value.split('-').map(Number);
         if (year < 1 || month < 1 || month > 12 || day < 1) return false;
-        const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-        return day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+        return day <= daysInMonth(year, month);
+    }
+
+    function calendarParts(now) {
+        try {
+            if (!Number.isFinite(Date.prototype.getTime.call(now))) return null;
+            return [Date.prototype.getFullYear.call(now), Date.prototype.getMonth.call(now) + 1, Date.prototype.getDate.call(now)];
+        } catch {
+            return null;
+        }
+    }
+
+    const calendarString = ([year, month, day]) => `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+    function localDate(now = new Date()) {
+        const parts = calendarParts(now);
+        return parts && parts[0] >= 1 && parts[0] <= 9999 ? calendarString(parts) : null;
+    }
+
+    function serviceLifecycle(service, now = new Date()) {
+        const unavailable = { finished: false, archived: false, archiveDate: null };
+        if (!validDate(service?.date)) return unavailable;
+        const current = calendarParts(now);
+        if (!current) return unavailable;
+        const today = current[0] * 10000 + current[1] * 100 + current[2];
+        const [year, month, day] = service.date.split('-').map(Number);
+        const archiveYear = month === 12 ? year + 1 : year;
+        const archiveMonth = month === 12 ? 1 : month + 1;
+        // Clamp month-end services rather than letting Date roll into another month.
+        const archiveDay = Math.min(day, daysInMonth(archiveYear, archiveMonth));
+        const archiveDate = calendarString([archiveYear, archiveMonth, archiveDay]);
+        // Numeric calendar comparisons avoid UTC, daylight-saving, and years 1–99 conversions.
+        return {
+            finished: year * 10000 + month * 100 + day < today,
+            archived: archiveYear * 10000 + archiveMonth * 100 + archiveDay <= today,
+            archiveDate
+        };
     }
 
     function validTime(value) {
@@ -101,5 +141,5 @@
 
     const date = value => validDate(value) ? new Date(`${value}T12:00:00`).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'Date unavailable';
     const message = (error, fallback = 'Something went wrong. Please try again.') => typeof error?.message === 'string' ? error.message : fallback;
-    window.GatherPlanner = Object.freeze({ empty, escape, validDate, validTime, duration, validate, validatePublic, date, message });
+    window.GatherPlanner = Object.freeze({ empty, escape, validDate, validTime, localDate, serviceLifecycle, duration, validate, validatePublic, date, message });
 })();

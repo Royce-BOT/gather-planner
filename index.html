@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta name="theme-color" content="#335a46" />
+    <meta name="theme-color" content="#244B76" />
     <title>Gather · Worship &amp; Ministry Planner</title>
     <link rel="icon" type="image/png" sizes="32x32" href="assets/gather-icon-32.png" />
     <link rel="apple-touch-icon" sizes="192x192" href="assets/gather-icon-192.png" />
@@ -13,7 +13,7 @@
   <body>
     <aside id="workspace-sidebar">
       <a class="brand" href="#"
-        ><img class="brand-mark" src="assets/gather-icon-192.png" alt="" width="44" height="44" /> <span>gather<small>WORSHIP & MINISTRY</small></span></a
+        ><span class="brand-mark" aria-hidden="true"></span> <span>gather<small>WORSHIP & MINISTRY</small></span></a
       >
       <p class="navlabel">YOUR WORKSPACE</p>
       <nav aria-label="Workspace">
@@ -53,14 +53,16 @@
       </header>
       <div id="access-notice" class="notice public-notice" role="status" aria-live="polite" hidden></div>
       <div id="content"><div class="empty" role="status">Loading public worship schedules…</div></div>
-      <footer>Gather · Plan with purpose. Serve with joy.</footer>
+      <footer>
+        <strong>Gather · Plan with purpose. Serve with joy.</strong>
+      </footer>
     </main>
     <section id="auth-screen" class="auth-screen" aria-label="Gather account" hidden>
       <div class="auth-story">
-        <a class="brand auth-brand" href="#"><img class="brand-mark" src="assets/gather-icon-192.png" alt="" width="44" height="44" /> <span>gather<small>WORSHIP &amp; MINISTRY</small></span></a>
+        <a class="brand auth-brand" href="#"><span class="brand-mark" aria-hidden="true"></span> <span>gather<small>WORSHIP &amp; MINISTRY</small></span></a>
         <div class="auth-story-copy">
           <span class="eyebrow">A PLACE TO PLAN WITH PURPOSE</span>
-          <h1>Meaningful moments<br />start together.</h1>
+          <h1>Meaningful moments <br />start together.</h1>
           <p>One shared home for your church’s services, ministry team, and songs. A little planning. A lot of purpose.</p>
           <div class="auth-story-detail"><span aria-hidden="true">✦</span><span>Prepare thoughtfully.<br />Serve with joy.</span></div>
         </div>
@@ -95,7 +97,13 @@
           <button id="auth-retry" class="secondary auth-retry" type="button" hidden>Try again</button>
           <p id="auth-access-note" class="auth-access-note">New here? Verify your email, then sign in to request access. A church admin will review your request.</p>
         </div>
-        <small class="auth-footnote">Gather · Plan with purpose. Serve with joy.</small>
+        <small class="auth-footnote">
+          Gather · Plan with purpose. Serve with joy.
+          <span id="auth-creator-credit">
+            <span class="creator-credit">Developed by: John Royce Macaraig</span>
+            <span class="creator-credit">Contact: macaraigjohnroyce@gmail.com</span>
+          </span>
+        </small>
       </div>
     </section>
     <dialog id="modal">

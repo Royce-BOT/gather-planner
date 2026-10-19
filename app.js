@@ -9,6 +9,7 @@ let privateLoad = null, publicLoad = null;
 const emptyPlanner = GatherPlanner.empty;
 let db = emptyPlanner(), confirmed = emptyPlanner();
 let view = 'overview', selected = null, editing = null;
+let serviceRange = 'current', calendarDay = GatherPlanner.localDate();
 const $ = selector => document.querySelector(selector);
 const esc = GatherPlanner.escape;
 
@@ -63,6 +64,7 @@ function lockCloud(message) {
     if ($('#modal').open) $('#modal').close();
     $('#modaltitle').textContent = '';
     $('#fields').replaceChildren(); $('#import').value = '';
+    clearTimeout(toastTimer);
     $('#toast').textContent = ''; $('#toast').style.display = 'none';
     $('#content').onclick = null; $('#content').oninput = null; $('#content').onchange = null;
     syncAccount(); render();
@@ -93,7 +95,7 @@ async function loadPublic(epoch) {
     } catch (error) {
         if (epoch !== publicEpoch) return;
         publicError = ['PGRST202', '42883'].includes(error?.code)
-            ? 'Public schedules are not configured yet. The project owner needs to run the public-view migration in README.md.'
+            ? 'Public schedules are not configured yet. The project owner needs to run the public-view migration in DEVELOPER.md.'
             : 'Public schedules could not be loaded. Check your connection and try again.';
     } finally {
         if (epoch === publicEpoch) {
@@ -118,7 +120,7 @@ async function retryPublic() {
 
 function accessError(error) {
     const text = GatherPlanner.message(error, 'Could not check church access. Check your connection and try again.');
-    if (['PGRST202', '42883', '42703'].includes(error?.code)) return 'The Gather approval upgrade is not installed yet. Ask the project owner to run the migration described in README.md.';
+    if (['PGRST202', '42883', '42703'].includes(error?.code)) return 'The Gather approval upgrade is not installed yet. Ask the project owner to run the migration described in DEVELOPER.md.';
     return text;
 }
 
@@ -203,9 +205,9 @@ async function bootCloud() {
             if (!cloud) { publicError = 'Could not connect to public schedules. Check your connection and try again.'; render(); }
         }
     });
-    window.addEventListener('focus', () => { void runAction(recheckAccess); });
-    document.addEventListener('visibilitychange', () => { void runAction(recheckAccess); });
-    setInterval(() => { void runAction(recheckAccess); }, 60000);
+    window.addEventListener('focus', () => { refreshCalendar(); void runAction(recheckAccess); });
+    document.addEventListener('visibilitychange', () => { refreshCalendar(); void runAction(recheckAccess); });
+    setInterval(() => { refreshCalendar(); void runAction(recheckAccess); }, 60000);
 }
 
 async function save() {
@@ -220,7 +222,7 @@ async function save() {
         requestStarted = true;
         const nextVersion = await GatherAccess.save(cloud, CHURCH_ID, snapshot, version);
         if (epoch !== accessEpoch || !cloudReady) return false;
-        cloudVersion = nextVersion; confirmed = structuredClone(snapshot); toast('Saved to Supabase');
+        cloudVersion = nextVersion; confirmed = structuredClone(snapshot); toast('Saved');
     } catch (error) {
         if (epoch !== accessEpoch || !cloudReady) return false;
         db = structuredClone(confirmed); failed = true;
@@ -241,12 +243,27 @@ async function save() {
 
 let toastTimer;
 function toast(message) {
-    clearTimeout(toastTimer); $('#toast').textContent = message; $('#toast').style.display = 'block';
-    toastTimer = setTimeout(() => { $('#toast').style.display = 'none'; $('#toast').textContent = ''; }, 6000);
+    clearTimeout(toastTimer);
+    const notification = $('#toast');
+    notification.style.animation = 'none';
+    notification.textContent = message; notification.style.display = 'block';
+    // Restart the fade so a new message gets the full time to be read.
+    void notification.offsetWidth;
+    notification.style.animation = '';
+    toastTimer = setTimeout(() => { notification.style.display = 'none'; notification.textContent = ''; }, 6000);
+}
+function refreshCalendar() {
+    // Reclassify at the next visible check after local midnight, without saving or fetching planner data.
+    if (!saving && document.visibilityState !== 'hidden' && calendarDay !== GatherPlanner.localDate()) render();
 }
 function render() {
+    calendarDay = GatherPlanner.localDate();
     if (!cloudReady && ['team', 'admin'].includes(view)) view = 'overview';
     if (view === 'admin' && member?.role !== 'admin') view = 'overview';
+    if (view === 'program') {
+        const service = (cloudReady ? db : publicDb).services.find(record => record.id === selected);
+        if (service) serviceRange = GatherPlanner.serviceLifecycle(service).archived ? 'past' : 'current';
+    }
     if (view === 'admin') {
         $('#breadcrumb').textContent = 'Workspace / Admin workspace';
         document.querySelectorAll('nav button').forEach(button => button.classList.toggle('active', button.dataset.view === view));
@@ -255,15 +272,16 @@ function render() {
     }
     GatherAdmin.clear();
     $('#content').onclick = null; $('#content').oninput = null; $('#content').onchange = null;
-    const output = GatherView.page({ planner: cloudReady ? db : { ...publicDb, team: [] }, privateAccess: cloudReady, canEdit, publicReady, publicError, publicLoading, view, selected });
+    const output = GatherView.page({ planner: cloudReady ? db : { ...publicDb, team: [] }, privateAccess: cloudReady, canEdit, publicReady, publicError, publicLoading, view, selected, serviceRange });
     view = output.view;
     $('#breadcrumb').textContent = output.breadcrumb;
-    document.querySelectorAll('nav button').forEach(button => button.classList.toggle('active', button.dataset.view === view));
+    document.querySelectorAll('nav button').forEach(button => button.classList.toggle('active', button.dataset.view === (view === 'program' ? 'services' : view)));
     $('#content').innerHTML = output.html;
     if ($('#retry-public')) $('#retry-public').onclick = () => runAction(retryPublic);
     document.querySelectorAll('[data-add],[data-edit],[data-delete],[data-add-item],[data-item],[data-remove-item],[data-move]').forEach(button => {
         button.disabled = saving || !canEdit || ('move' in button.dataset && Number(button.dataset.move) === 0);
     });
+    document.querySelectorAll('[data-service-range]').forEach(button => { button.disabled = saving; });
     $('#import').disabled = saving || !canEdit;
 }
 
@@ -308,11 +326,22 @@ async function handleClick(event) {
     const button = event.target.closest('button');
     if (!button || button.disabled || !cloudReady && !publicReady) return;
     const data = button.dataset;
+    if ('serviceRange' in data) {
+        if (saving || !['current', 'past'].includes(data.serviceRange)) return;
+        serviceRange = data.serviceRange; view = 'services'; render(); return;
+    }
     if (data.view) {
         if (saving || !['overview', 'services', 'team', 'songs', 'admin'].includes(data.view) || ['team', 'admin'].includes(data.view) && !cloudReady || data.view === 'admin' && member?.role !== 'admin') return;
-        view = data.view; render();
+        view = data.view;
+        if (view === 'services') serviceRange = 'current';
+        render();
     }
-    if (data.open) { selected = data.open; view = 'program'; render(); }
+    if (data.open) {
+        const service = (cloudReady ? db : publicDb).services.find(record => record.id === data.open);
+        if (!service) return;
+        serviceRange = GatherPlanner.serviceLifecycle(service).archived ? 'past' : 'current';
+        selected = data.open; view = 'program'; render();
+    }
     if ('print' in data) window.print();
     if (saving || !canEdit || !cloudReady) return;
     if (data.add) modal(data.add);

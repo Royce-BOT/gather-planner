@@ -1,7 +1,7 @@
 -- ORIGINAL BASE SCHEMA: new installations only. Never rerun on an existing church.
 -- After this file, run the member_approval, public_view, and audit_hardening
 -- migrations in that order. Then use sql/first-admin.sql only if needed.
--- Existing installations run only missing upgrades, following README.md.
+-- Existing installations run only missing upgrades, following DEVELOPER.md.
 begin;
 create table public.gather_planners (
  id uuid primary key default gen_random_uuid(),
@@ -38,5 +38,5 @@ create trigger gather_version before update on public.gather_planners for each r
 insert into public.gather_planners(name) values ('My Church') returning id;
 commit;
 -- Copy the returned id into churchId in config.js.
--- Follow README.md to apply the upgrade and promote your verified existing account
+-- Follow DEVELOPER.md to apply the upgrade and promote your verified existing account
 -- with explicit church/user UUIDs. Subsequent approvals happen in Admin workspace.

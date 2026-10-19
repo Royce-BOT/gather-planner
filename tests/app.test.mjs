@@ -16,8 +16,14 @@ const publicData = () => ({
   songs: [{ id: 'public-song', title: 'Public Song' }]
 });
 
-async function fixture({ status = 'approved', role = 'editor', deferredRead = null, deferredWrite = null, deferredPublic = null, publicError = null, projection = publicData(), conflict = false, writeError = null } = {}) {
+async function fixture({ status = 'approved', role = 'editor', deferredRead = null, deferredWrite = null, deferredPublic = null, publicError = null, projection = publicData(), privatePlanner = plannerData(), now = new Date(2026, 9, 19, 12), conflict = false, writeError = null } = {}) {
   const calls = [], elements = new Map(), handlers = new Map();
+  const windowHandlers = new Map(), intervals = [];
+  let clock = Number(now);
+  class FixtureDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [clock])); }
+    static now() { return clock; }
+  }
   function element(selector) {
     if (!elements.has(selector)) elements.set(selector, {
       id: selector.slice(1), textContent: '', innerHTML: '', value: '', open: false, hidden: false, disabled: false, dataset: {}, style: {},
@@ -27,7 +33,7 @@ async function fixture({ status = 'approved', role = 'editor', deferredRead = nu
     });
     return elements.get(selector);
   }
-  let callbacks, currentStatus = status, currentRole = role, saved = plannerData(), version = 4;
+  let callbacks, currentStatus = status, currentRole = role, saved = structuredClone(privatePlanner), version = 4;
   let authUser = verifiedUser, nextUserResponse = null, nextReadResponse = null, nextPublicResponse = null;
   const query = {
     select() { return this; }, eq(column, value) { calls.push(['eq', column, value]); return this; },
@@ -73,11 +79,12 @@ async function fixture({ status = 'approved', role = 'editor', deferredRead = nu
     createElement() { return { click() { calls.push(['download']); } }; }
   };
   const context = vm.createContext({
-    window: { GatherAuth: auth, GatherAdmin: admin, addEventListener() {}, print() { calls.push(['print']); } },
+    window: { GatherAuth: auth, GatherAdmin: admin, addEventListener(type, handler) { windowHandlers.set(type, handler); }, print() { calls.push(['print']); } },
     GatherAuth: auth, GatherAdmin: admin, document, structuredClone,
-    setInterval() {}, setTimeout() { return 1; }, clearTimeout() {}, confirm() { calls.push(['confirm']); return true; },
+    Date: FixtureDate,
+    setInterval(handler) { intervals.push(handler); }, setTimeout() { return 1; }, clearTimeout() {}, confirm() { calls.push(['confirm']); return true; },
     crypto: { randomUUID: () => 'new-record' }, Blob,
-    URL: { createObjectURL() { calls.push(['blob']); return 'blob:backup'; }, revokeObjectURL() {} },
+    URL: { createObjectURL(blob) { calls.push(['blob', blob]); return 'blob:backup'; }, revokeObjectURL() {} },
     FormData: class { constructor(form) { return Object.entries(form.values); } }
   });
   vm.runInContext(read('config.js'), context);
@@ -90,7 +97,8 @@ async function fixture({ status = 'approved', role = 'editor', deferredRead = nu
   vm.runInContext(read('app.js'), context);
   await flush();
   return {
-    context, calls, elements, element, handlers,
+    context, calls, elements, element, handlers, windowHandlers, intervals,
+    setNow(now) { clock = Number(now); },
     async signIn(user = verifiedUser) { authUser = user; await callbacks.onSession(user); },
     async logout() { await auth.logout(); },
     setMembership(status, role = currentRole) { currentStatus = status; currentRole = role; },
@@ -99,7 +107,7 @@ async function fixture({ status = 'approved', role = 'editor', deferredRead = nu
     deferNextRead(response) { nextReadResponse = response; },
     deferNextPublic(response) { nextPublicResponse = response; },
     run(expression) { return vm.runInContext(expression, context); },
-    state() { return JSON.parse(vm.runInContext('JSON.stringify({cloudReady, publicReady, publicDb, canEdit, db, confirmed, member, view, selected, cloudVersion, saving})', context)); },
+    state() { return JSON.parse(vm.runInContext('JSON.stringify({cloudReady, publicReady, publicDb, canEdit, db, confirmed, member, view, selected, serviceRange, cloudVersion, saving})', context)); },
     async click(dataset) { handlers.get('click')({ target: { closest: () => ({ dataset, disabled: false }) } }); await flush(); }
   };
 }
@@ -473,7 +481,7 @@ test('offline writes restore confirmed records and never announce success', asyn
   assert.equal(f.state().cloudVersion, 4);
   assert.equal(f.state().saving, false);
   assert.match(f.element('#toast').textContent, /Save not confirmed.*Network unavailable/);
-  assert.doesNotMatch(f.element('#toast').textContent, /Saved to Supabase/);
+  assert.notEqual(f.element('#toast').textContent, 'Saved');
 });
 
 test('repeated private refreshes share a read and preserve the current private program', async () => {
@@ -524,4 +532,89 @@ test('private loading re-verifies a changed identity without fetching its protec
   assert.equal(f.state().db.services.length, 0);
   assert.equal(f.calls.filter(call => call[0] === 'read').length, reads);
   assert.ok(f.calls.some(call => call[0] === 'session-recheck'));
+});
+
+test('visitors browse Past programs and return to the archive without fetching private records', async () => {
+  const projection = publicData();
+  projection.services.push({ ...structuredClone(projection.services[0]), id: 'older-public', title: 'Archived Public Gathering', date: '2026-09-19' });
+  const f = await fixture({ projection });
+  assert.doesNotMatch(f.element('#content').innerHTML, /Archived Public Gathering/);
+  await f.click({ view: 'services' });
+  assert.doesNotMatch(f.element('#content').innerHTML, /Archived Public Gathering/);
+  await f.click({ serviceRange: 'past' });
+  assert.match(f.element('#content').innerHTML, /Archived Public Gathering/);
+  assert.doesNotMatch(f.element('#content').innerHTML, /data-open="public-service"/);
+  await f.click({ open: 'older-public' });
+  assert.match(f.element('#content').innerHTML, /Program finished/);
+  assert.match(f.element('#content').innerHTML, /data-service-range="past"/);
+  await f.click({ view: 'services', serviceRange: 'past' });
+  assert.equal(f.state().serviceRange, 'past');
+  await f.click({ serviceRange: 'unknown' });
+  assert.equal(f.state().serviceRange, 'past');
+  assert.equal(f.state().publicDb.services.length, 2);
+  assert.equal(f.calls.some(call => ['request', 'read', 'write', 'from'].includes(call[0])), false);
+  assert.doesNotMatch(f.element('#content').innerHTML, /data-edit|data-delete|data-add|Existing notes|Volunteer One/);
+});
+
+test('editing an archived service announces Saved and retains all plans in writes and backups', async () => {
+  const privatePlanner = plannerData();
+  privatePlanner.services[0].date = '2026-09-19';
+  privatePlanner.services.push({ ...structuredClone(privatePlanner.services[0]), id: 'future-service', title: 'Future Gathering', date: '2026-10-20' });
+  const f = await fixture({ privatePlanner }); await f.signIn();
+  await f.click({ serviceRange: 'past' });
+  await f.click({ open: 'service-1' });
+  assert.equal(f.state().serviceRange, 'past');
+  f.run('modal("services", "service-1")');
+  await f.element('#form').onsubmit({ preventDefault() {}, target: { values: {
+    title: 'Rescheduled Gathering', date: '2026-10-21', time: '09:00',
+    theme: 'Gather together', location: 'Sanctuary', notes: 'Existing notes'
+  } } });
+  assert.equal(f.element('#toast').textContent, 'Saved');
+  assert.equal(f.state().serviceRange, 'current');
+  assert.doesNotMatch(f.element('#content').innerHTML, /Program finished/);
+  const write = f.calls.find(call => call[0] === 'write')[1];
+  assert.equal(write.data.services.length, 2);
+  assert.equal(write.data.services[0].program.length, 2);
+  assert.equal(write.data.services[1].title, 'Future Gathering');
+  f.element('#export').onclick();
+  const backup = JSON.parse(await f.calls.find(call => call[0] === 'blob')[1].text());
+  assert.deepEqual(backup, f.state().db);
+  assert.equal(backup.services.length, 2);
+  assert.equal(backup.services[0].notes, 'Existing notes');
+});
+
+test('a local day change reclassifies public plans on tab return without writes or extra fetches', async () => {
+  const projection = publicData(); projection.services[0].date = '2026-09-19';
+  const f = await fixture({ projection, now: new Date(2026, 9, 18, 23, 59) });
+  assert.match(f.element('#content').innerHTML, /Public Sunday Worship/);
+  const requests = f.calls.filter(call => ['public-read', 'request', 'read', 'write'].includes(call[0])).length;
+  f.context.document.visibilityState = 'hidden';
+  f.setNow(new Date(2026, 9, 19, 0, 0));
+  f.intervals[0](); await flush();
+  assert.match(f.element('#content').innerHTML, /Public Sunday Worship/);
+  f.context.document.visibilityState = 'visible';
+  f.windowHandlers.get('focus')(); await flush();
+  assert.doesNotMatch(f.element('#content').innerHTML, /Public Sunday Worship/);
+  await f.click({ serviceRange: 'past' });
+  assert.match(f.element('#content').innerHTML, /Public Sunday Worship/);
+  assert.equal(f.calls.filter(call => ['public-read', 'request', 'read', 'write'].includes(call[0])).length, requests);
+  assert.equal(f.state().publicDb.services.length, 1);
+});
+
+test('archive navigation cannot interrupt a save or grant a viewer editing permission', async () => {
+  let resolveWrite;
+  const f = await fixture({ deferredWrite: new Promise(resolve => { resolveWrite = resolve; }) });
+  await f.signIn();
+  const saving = f.run('save()');
+  await f.click({ serviceRange: 'past' });
+  assert.equal(f.state().serviceRange, 'current');
+  resolveWrite({ data: { version: 5 }, error: null }); await saving;
+  const viewer = await fixture({ role: 'viewer' }); await viewer.signIn();
+  viewer.run('db.services[0].date = "2026-09-19"; render()');
+  await viewer.click({ serviceRange: 'past' });
+  await viewer.click({ open: 'service-1' });
+  await viewer.click({ edit: 'service-1', kind: 'services' });
+  assert.equal(viewer.state().canEdit, false);
+  assert.equal(viewer.element('#modal').open, false);
+  assert.equal(viewer.calls.some(call => call[0] === 'write'), false);
 });
